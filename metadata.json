@@ -1,0 +1,6 @@
+{
+  "name": "AI Career Mentor",
+  "description": "Minimalist, high-focus career guidance platform for tech professionals with resume ATS analysis, job matching, career roadmaps, real-time mock interviews, and AI chat mentoring.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
