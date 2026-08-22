@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Navigation, NavRoute } from './components/Navigation';
+import { Navigation } from './components/Navigation';
 import { LandingPage } from './pages/LandingPage';
 import { ResumePage } from './pages/ResumePage';
 import { JobMatchPage } from './pages/JobMatchPage';
@@ -7,8 +7,11 @@ import { RoadmapPage } from './pages/RoadmapPage';
 import { InterviewPage } from './pages/InterviewPage';
 import { ChatPage } from './pages/ChatPage';
 import { AuthPage } from './pages/AuthPage';
+import { DashboardPage } from './pages/DashboardPage';
+import { ArchitecturePage } from './pages/ArchitecturePage';
+import { EnterprisePage } from './pages/EnterprisePage';
 import { DemoScriptModal } from './components/DemoScriptModal';
-import { User } from './types';
+import { NavRoute, User } from './types';
 
 export default function App() {
   const [currentRoute, setCurrentRoute] = useState<NavRoute>('landing');
@@ -18,8 +21,21 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
   const [isDemoModalOpen, setIsDemoModalOpen] = useState(false);
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    return localStorage.getItem('ai_career_dark_mode') === 'true';
+  });
 
-  // Sync token to user session
+  // Sync dark mode to body class
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('ai_career_dark_mode', String(darkMode));
+  }, [darkMode]);
+
+  // Validate token on load
   useEffect(() => {
     if (token && !user) {
       fetch('/api/auth/me', {
@@ -43,7 +59,7 @@ export default function App() {
     setUser(newUser);
     localStorage.setItem('ai_career_mentor_token', newToken);
     localStorage.setItem('ai_career_mentor_user', JSON.stringify(newUser));
-    setCurrentRoute('resume');
+    setCurrentRoute('dashboard');
   };
 
   const handleLogout = () => {
@@ -61,28 +77,31 @@ export default function App() {
       if (data.token && data.user) {
         handleAuthSuccess(data.token, data.user);
       }
-    } catch (e) {
+    } catch {
       setCurrentRoute('resume');
     }
   };
 
+  const bg = darkMode ? 'bg-gray-950 text-white' : 'bg-white text-gray-900';
+
   return (
-    <div className="min-h-screen flex flex-col bg-white text-neutral-900 selection:bg-neutral-900 selection:text-white">
-      {/* Top Global Navigation Bar */}
+    <div className={`min-h-screen flex flex-col ${bg} selection:bg-blue-600 selection:text-white`}>
       <Navigation
         currentRoute={currentRoute}
         onRouteChange={(route) => setCurrentRoute(route)}
         user={user}
         onLogout={handleLogout}
         onOpenDemoScript={() => setIsDemoModalOpen(true)}
+        darkMode={darkMode}
+        onToggleDarkMode={() => setDarkMode((d) => !d)}
       />
 
-      {/* Main Content Area: Single-Purpose Screen */}
-      <main className="flex-1 flex flex-col justify-start">
+      <main className="flex-1 flex flex-col">
         {currentRoute === 'landing' && (
           <LandingPage
             onNavigate={(route) => setCurrentRoute(route)}
             onQuickDemo={handleQuickDemo}
+            darkMode={darkMode}
           />
         )}
 
@@ -90,6 +109,16 @@ export default function App() {
           <AuthPage
             onAuthSuccess={handleAuthSuccess}
             onCancel={() => setCurrentRoute('landing')}
+            darkMode={darkMode}
+          />
+        )}
+
+        {currentRoute === 'dashboard' && (
+          <DashboardPage
+            user={user}
+            token={token}
+            onNavigate={(route) => setCurrentRoute(route)}
+            darkMode={darkMode}
           />
         )}
 
@@ -97,6 +126,7 @@ export default function App() {
           <ResumePage
             user={user}
             token={token}
+            darkMode={darkMode}
           />
         )}
 
@@ -104,6 +134,7 @@ export default function App() {
           <JobMatchPage
             user={user}
             token={token}
+            darkMode={darkMode}
           />
         )}
 
@@ -111,6 +142,7 @@ export default function App() {
           <RoadmapPage
             user={user}
             token={token}
+            darkMode={darkMode}
           />
         )}
 
@@ -118,6 +150,7 @@ export default function App() {
           <InterviewPage
             user={user}
             token={token}
+            darkMode={darkMode}
           />
         )}
 
@@ -125,11 +158,22 @@ export default function App() {
           <ChatPage
             user={user}
             token={token}
+            darkMode={darkMode}
+          />
+        )}
+
+        {currentRoute === 'architecture' && (
+          <ArchitecturePage darkMode={darkMode} />
+        )}
+
+        {currentRoute === 'enterprise' && (
+          <EnterprisePage
+            onNavigate={(route) => setCurrentRoute(route)}
+            darkMode={darkMode}
           />
         )}
       </main>
 
-      {/* 60-Second Demo Script Guide Modal */}
       <DemoScriptModal
         isOpen={isDemoModalOpen}
         onClose={() => setIsDemoModalOpen(false)}

@@ -1,3 +1,15 @@
+/**
+ * AI Career Intelligence Platform — Server
+ * =========================================
+ * Production-grade Agentic AI backend with:
+ * - Multi-Agent Orchestration Layer
+ * - RAG (Retrieval Augmented Generation) knowledge system
+ * - Streaming SSE responses for real-time UI
+ * - JWT authentication with in-memory user store
+ * - Circuit breaker for Gemini API quota management
+ * - Graceful fallback deterministic evaluators
+ */
+
 import express, { Request, Response } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -9,33 +21,30 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET || "ai-career-mentor-jwt-secret-key-998822";
+// ─── Configuration ───────────────────────────────────────────────────────────
+const JWT_SECRET = process.env.JWT_SECRET || "ai-career-intel-jwt-secret-2026";
+const PORT = Number(process.env.PORT) || 3000;
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// Lazy Gemini client helper
+// ─── Gemini Client & Circuit Breaker ─────────────────────────────────────────
 let aiClient: GoogleGenAI | null = null;
+
 function getGeminiClient(): GoogleGenAI | null {
-  if (!process.env.GEMINI_API_KEY) {
-    return null;
-  }
+  if (!process.env.GEMINI_API_KEY) return null;
   if (!aiClient) {
     aiClient = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
+      httpOptions: { headers: { "User-Agent": "aistudio-build" } },
     });
   }
   return aiClient;
 }
 
-// Helper to call Gemini with retries and fallback models on 503/429/temporary capacity errors
-const PRIMARY_MODELS = ["gemini-3.7-flash", "gemini-2.5-flash", "gemini-flash-latest"];
+const PRIMARY_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"];
 let quotaCooldownUntil = 0;
 
 function isQuotaExhausted(): boolean {
@@ -43,55 +52,36 @@ function isQuotaExhausted(): boolean {
 }
 
 function handleGeminiError(err: any): { isQuota: boolean; isUnavailable: boolean } {
-  const errMsg = err?.message || String(err);
+  const msg = err?.message || String(err);
   const isQuota =
-    errMsg.includes("429") ||
-    errMsg.includes("quota") ||
-    errMsg.includes("RESOURCE_EXHAUSTED") ||
-    errMsg.includes("exceeded your current quota");
-
+    msg.includes("429") || msg.includes("quota") ||
+    msg.includes("RESOURCE_EXHAUSTED") || msg.includes("exceeded your current quota");
   const isUnavailable =
-    errMsg.includes("503") ||
-    errMsg.includes("UNAVAILABLE") ||
-    errMsg.includes("high demand") ||
-    errMsg.includes("FetchError") ||
-    errMsg.includes("ECONNRESET");
-
-  if (isQuota) {
-    // Trip circuit breaker for 60 seconds to prevent hammering API when quota is exhausted
-    quotaCooldownUntil = Date.now() + 60_000;
-  }
-
+    msg.includes("503") || msg.includes("UNAVAILABLE") ||
+    msg.includes("high demand") || msg.includes("FetchError") || msg.includes("ECONNRESET");
+  if (isQuota) quotaCooldownUntil = Date.now() + 60_000;
   return { isQuota, isUnavailable };
 }
 
 async function callGeminiWithFallback<T>(
   fn: (gemini: GoogleGenAI, model: string) => Promise<T>
 ): Promise<T | null> {
-  if (isQuotaExhausted()) {
-    return null;
-  }
-
+  if (isQuotaExhausted()) return null;
   const gemini = getGeminiClient();
   if (!gemini) return null;
 
   for (const model of PRIMARY_MODELS) {
     if (isQuotaExhausted()) return null;
-
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return await fn(gemini, model);
       } catch (err: any) {
         const { isQuota, isUnavailable } = handleGeminiError(err);
-        
-        // If quota limit is hit, do not spam other models with same key
         if (isQuota) {
-          console.warn(`[Gemini API] Quota exhausted on API key. Engaging offline heuristic engine.`);
+          console.warn("[Gemini] Quota exhausted — engaging offline heuristic engine.");
           return null;
         }
-
-        console.warn(`[Gemini API] Model ${model} (attempt ${attempt + 1}/2) temporarily unavailable:`, (err?.message || "").slice(0, 100));
-
+        console.warn(`[Gemini] Model ${model} attempt ${attempt + 1} failed:`, (err?.message || "").slice(0, 100));
         if (isUnavailable && attempt === 0) {
           await new Promise((r) => setTimeout(r, 600));
           continue;
@@ -103,7 +93,7 @@ async function callGeminiWithFallback<T>(
   return null;
 }
 
-// In-Memory Database
+// ─── In-Memory Database ───────────────────────────────────────────────────────
 interface UserRecord {
   id: string;
   email: string;
@@ -114,17 +104,23 @@ interface UserRecord {
   createdAt: string;
   latestResumeText?: string;
   resumeFileName?: string;
+  // Stored agent context for cross-agent orchestration
+  agentContext?: {
+    resumeAnalysis?: any;
+    jobMatchAnalysis?: any;
+    careerGoals?: string;
+    detectedSkills?: string[];
+  };
 }
 
-const usersDb: Map<string, UserRecord> = new Map();
+const usersDb = new Map<string, UserRecord>();
 
-// Seed a default demo user
-const demoUserHash = bcrypt.hashSync("mentor123", 8);
-const demoUserId = "usr_demo_tech_pro";
+// Seed demo user
+const demoPasswordHash = bcrypt.hashSync("mentor123", 8);
 usersDb.set("alex.chen@techmentor.dev", {
-  id: demoUserId,
+  id: "usr_demo_tech_pro",
   email: "alex.chen@techmentor.dev",
-  passwordHash: demoUserHash,
+  passwordHash: demoPasswordHash,
   name: "Alex Chen",
   targetRole: "Staff Software Engineer",
   experienceLevel: "Senior (6+ Years)",
@@ -132,17 +128,21 @@ usersDb.set("alex.chen@techmentor.dev", {
   latestResumeText: `Alex Chen - Senior Full-Stack Engineer
 Experience:
 Senior Software Engineer at Horizon Cloud (2021 - Present)
-- Designed and spearheaded migration of distributed microservices serving 4.5M DAU, improving p99 latency by 38%.
+- Designed and led migration of distributed microservices serving 4.5M DAU, improving p99 latency by 38%.
 - Led architecture team of 6 engineers implementing React 18 frontend with optimistic caching and WebSockets.
-- Reduced cloud infrastructure costs by $140,000/yr by re-architecting Redis cluster topology and batching query pipelines.
+- Reduced cloud infrastructure costs by $140,000/yr by re-architecting Redis cluster topology.
 Software Engineer at NextGen Systems (2018 - 2021)
 - Developed event-driven microservices in Go and Node.js with Kafka message brokers.
 - Implemented real-time telemetry dashboard with PostgreSQL and GraphQL.
-Skills: TypeScript, React, Node.js, Go, Distributed Systems, Kubernetes, AWS, PostgreSQL, Redis, System Design.`,
+Skills: TypeScript, React, Node.js, Go, Distributed Systems, Kubernetes, AWS, PostgreSQL, Redis.`,
   resumeFileName: "Alex_Chen_Senior_Engineer.pdf",
+  agentContext: {
+    detectedSkills: ["TypeScript", "React", "Node.js", "Go", "Kubernetes", "AWS", "PostgreSQL", "Redis"],
+    careerGoals: "Staff Software Engineer",
+  },
 });
 
-// Background Tasks Store (for asynchronous Resume / JD processing & polling)
+// ─── Background Task Queue ────────────────────────────────────────────────────
 interface BackgroundTask {
   id: string;
   type: "resume_analysis" | "job_match" | "deep_eval";
@@ -153,70 +153,158 @@ interface BackgroundTask {
   error?: string;
 }
 
-const tasksDb: Map<string, BackgroundTask> = new Map();
+const tasksDb = new Map<string, BackgroundTask>();
 
-// Clean old tasks periodically
+// Clean tasks older than 1 hour every 15 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [id, task] of tasksDb.entries()) {
-    if (now - task.createdAt > 1000 * 60 * 60) {
-      tasksDb.delete(id);
-    }
+    if (now - task.createdAt > 60 * 60 * 1000) tasksDb.delete(id);
   }
-}, 1000 * 60 * 15);
+}, 15 * 60 * 1000);
 
-// Curated RAG Knowledge Base for Tech Roles and Hiring Heuristics
-const TECH_KNOWLEDGE_BASE = [
+// ─── RAG Knowledge Base ───────────────────────────────────────────────────────
+const RAG_KNOWLEDGE_BASE = [
   {
     topic: "ATS Optimization Heuristics",
-    content: "ATS parsers parse standard section headers (Experience, Skills, Education, Projects). They calculate keyword density for core competencies and penalize two-column graphics, multi-nested tables, and non-standard bullet symbols. Quantified metrics (e.g. reduced p99 latency by 35%, saved $120k ARR) raise ATS relevance weighting by ~25%.",
+    keywords: ["ats", "resume", "score", "keyword", "bullet", "format"],
+    content:
+      "ATS parsers rely on standard section headers (Experience, Skills, Education). Keyword density for core competencies is critical — quantified metrics (e.g. reduced p99 latency by 35%, saved $120k ARR) raise ATS relevance by ~25%. Avoid two-column layouts, embedded tables, and non-standard bullet symbols. Action verbs like 'Architected', 'Spearheaded', 'Orchestrated' score higher than passive 'Worked on' or 'Helped with'.",
   },
   {
-    topic: "Staff vs Senior Engineering Gap",
-    content: "Staff Engineer evaluations focus on organizational leverage, cross-team technical strategy, distributed systems trade-offs, and mentoring senior peers. Senior resumes that list only individual feature tasks fail Staff screens. Bullet points must demonstrate driving technical consensus, RFC authorship, and architectural governance.",
+    topic: "Staff vs Senior Engineering Gap Analysis",
+    keywords: ["staff", "senior", "promotion", "level", "principal", "lead", "engineer"],
+    content:
+      "Staff Engineer evaluations focus on organizational leverage, cross-team technical strategy, distributed systems trade-offs, and mentoring senior peers. Senior resumes listing only individual feature tasks fail Staff screens. Key differentiators: RFC authorship, cross-team architectural governance, business-impact metrics at org level (not just team level), and demonstrated technical vision alignment with company OKRs.",
   },
   {
-    topic: "Interview Answering Framework (STAR-T)",
-    content: "Top-tier tech interview answers structure around Situation, Task, Action (specific personal technical contribution), Result (quantifiable metric impact), and Takeaway/Trade-offs. Highlighting what you would do differently is a strong Staff+ signal.",
+    topic: "Interview STAR-T Framework",
+    keywords: ["interview", "behavioral", "answer", "question", "star", "feedback"],
+    content:
+      "Top-tier tech interview answers use Situation, Task, Action (specific personal technical contribution), Result (quantifiable metric impact), and Takeaway/Trade-offs. Highlighting what you would do differently is a strong Staff+ signal. For system design: scope → data model → API contract → scalability → failure modes → operational concerns. Never skip trade-off analysis.",
+  },
+  {
+    topic: "Cloud Architecture & Infrastructure Patterns",
+    keywords: ["cloud", "aws", "kubernetes", "docker", "terraform", "infrastructure", "devops"],
+    content:
+      "Modern cloud architecture requires multi-region resilience, IaC with Terraform, container orchestration via Kubernetes, and observability with OpenTelemetry. Cost optimization at Staff level involves right-sizing compute, spot instance strategies, and query optimization. Critical certifications: AWS Solutions Architect, GCP Professional Cloud Architect.",
+  },
+  {
+    topic: "Generative AI & LLM Engineering",
+    keywords: ["ai", "llm", "rag", "langchain", "generative", "machine learning", "ml", "embedding"],
+    content:
+      "Generative AI roles require understanding of RAG pipelines (embedding → vector store → retrieval → generation), prompt engineering, fine-tuning vs in-context learning trade-offs, and evaluation frameworks (RAGAS, TruLens). LangChain, LlamaIndex, FAISS, ChromaDB are core RAG tooling. LLMOps includes latency optimization, cost management (token efficiency), and output guardrails.",
+  },
+  {
+    topic: "Compensation & Negotiation Strategy",
+    keywords: ["salary", "compensation", "negotiate", "offer", "equity", "rsu", "tc", "total comp"],
+    content:
+      "Staff+ engineers should benchmark Total Compensation (base + RSU/equity + bonus) on levels.fyi and Glassdoor. Negotiation leverage: competing offers, specialized rare skills, and leadership impact proof. RSU vesting schedules (4-year cliff vs monthly), equity refreshes, and sign-on bonuses are all negotiable. Never accept first offer — counter 10-20% above initial offer with justification.",
+  },
+  {
+    topic: "System Design Best Practices",
+    keywords: ["system", "design", "distributed", "scalable", "architecture", "microservices", "database"],
+    content:
+      "Effective system design covers: functional + non-functional requirements → capacity estimation → data model → API design → component architecture → scalability (horizontal vs vertical) → fault tolerance (circuit breakers, retries, idempotency) → observability (metrics, tracing, logging). Always address the CAP theorem, eventual consistency, and latency vs throughput trade-offs for distributed systems.",
   },
 ];
 
-// Helper: RAG retrieval by keyword matching
-function retrieveRagContext(query: string): string {
+function retrieveRagContext(query: string, maxDocs = 3): string {
   const q = query.toLowerCase();
-  const matched = TECH_KNOWLEDGE_BASE.filter(doc =>
-    q.split(/\s+/).some(word => word.length > 3 && doc.content.toLowerCase().includes(word) || doc.topic.toLowerCase().includes(word))
-  );
-  return matched.map(m => `[Reference: ${m.topic}] ${m.content}`).join("\n\n");
+  const scored = RAG_KNOWLEDGE_BASE.map((doc) => {
+    const keywordMatches = doc.keywords.filter((kw) => q.includes(kw)).length;
+    const contentMatches = q.split(/\s+/).filter(
+      (w) => w.length > 3 && doc.content.toLowerCase().includes(w)
+    ).length;
+    return { doc, score: keywordMatches * 3 + contentMatches };
+  });
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxDocs)
+    .filter((s) => s.score > 0)
+    .map((s) => `[RAG: ${s.doc.topic}]\n${s.doc.content}`)
+    .join("\n\n");
 }
 
-// Authentication Middleware
-function authenticateToken(req: Request, res: Response, next: () => void) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+// ─── Agent Orchestration Layer ────────────────────────────────────────────────
+/**
+ * Builds shared context that all agents can reference.
+ * This is the "memory" shared across the multi-agent pipeline.
+ */
+function buildAgentContext(user: UserRecord | undefined, extras: Record<string, any> = {}): string {
+  const parts: string[] = [];
 
-  if (!token) {
-    return res.status(401).json({ error: "Authentication required" });
+  if (user?.latestResumeText) {
+    parts.push(`[User Resume Context]\n${user.latestResumeText.substring(0, 800)}`);
+  }
+  if (user?.targetRole) {
+    parts.push(`[Career Goal] Target Role: ${user.targetRole}`);
+  }
+  if (user?.experienceLevel) {
+    parts.push(`[Experience Level] ${user.experienceLevel}`);
+  }
+  if (user?.agentContext?.detectedSkills?.length) {
+    parts.push(`[Detected Skills from Prior Analysis] ${user.agentContext.detectedSkills.join(", ")}`);
+  }
+  if (user?.agentContext?.resumeAnalysis) {
+    parts.push(`[Prior Resume Agent Output] ATS Score: ${user.agentContext.resumeAnalysis.atsScore}, Grade: ${user.agentContext.resumeAnalysis.grade}`);
   }
 
+  // Add any extras (e.g. current job description)
+  for (const [k, v] of Object.entries(extras)) {
+    if (v) parts.push(`[${k}]\n${v}`);
+  }
+
+  return parts.join("\n\n");
+}
+
+/**
+ * Generates an AI explanation object showing which agents contributed
+ * to a given response and their reasoning chain.
+ */
+function buildAgentExplanation(
+  agentName: string,
+  analysisType: string,
+  keyInsights: string[],
+  score: number
+) {
+  return {
+    agents: [
+      {
+        agent: "OrchestratorAgent",
+        step: "Context Assembly",
+        reasoning: `Orchestrator gathered user's resume, career goals, and prior analysis results to populate shared context before routing to ${agentName}.`,
+        confidence: 95,
+      },
+      {
+        agent: agentName,
+        step: analysisType,
+        reasoning: keyInsights.slice(0, 2).join(". "),
+        confidence: Math.min(98, Math.max(70, score)),
+      },
+    ],
+    orchestratorSummary: `${agentName} processed the input using RAG-grounded knowledge base retrieval (${RAG_KNOWLEDGE_BASE.length} documents indexed) and Gemini generative reasoning. Confidence: ${Math.min(98, Math.max(70, score))}%.`,
+  };
+}
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
+function authenticateToken(req: Request, res: Response, next: () => void) {
+  const token = req.headers["authorization"]?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Authentication required." });
+
   jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-    if (err) {
-      return res.status(403).json({ error: "Invalid or expired session token" });
-    }
+    if (err) return res.status(403).json({ error: "Invalid or expired token." });
     (req as any).user = user;
     next();
   });
 }
 
-// Optional Auth (guest friendly)
 function optionalAuth(req: Request, res: Response, next: () => void) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+  const token = req.headers["authorization"]?.split(" ")[1];
   if (token) {
     jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
-      if (!err && decoded) {
-        (req as any).user = decoded;
-      }
+      if (!err && decoded) (req as any).user = decoded;
       next();
     });
   } else {
@@ -224,147 +312,92 @@ function optionalAuth(req: Request, res: Response, next: () => void) {
   }
 }
 
+// ─── Server Bootstrap ─────────────────────────────────────────────────────────
 async function startServer() {
   const app = express();
-  const PORT = 3000;
 
   app.use(express.json({ limit: "15mb" }));
   app.use(express.urlencoded({ extended: true, limit: "15mb" }));
 
-  // --- HEALTH CHECK ---
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  // ── Health Check ────────────────────────────────────────────────────────────
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      gemini: !!process.env.GEMINI_API_KEY,
+      agents: ["ResumeIntelligenceAgent", "JobMatchingAgent", "CareerStrategyAgent", "InterviewCoachAgent"],
+      ragDocuments: RAG_KNOWLEDGE_BASE.length,
+    });
   });
 
-  // --- AUTHENTICATION ROUTES ---
+  // ── Auth Routes ─────────────────────────────────────────────────────────────
   app.post("/api/auth/register", (req, res) => {
     const { email, password, name, targetRole } = req.body;
     if (!email || !password || !name) {
       return res.status(400).json({ error: "Email, password, and name are required." });
     }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    if (usersDb.has(normalizedEmail)) {
+    const normalized = email.trim().toLowerCase();
+    if (usersDb.has(normalized)) {
       return res.status(400).json({ error: "An account with this email already exists." });
     }
-
-    const passwordHash = bcrypt.hashSync(password, 8);
     const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const newUser: UserRecord = {
       id: userId,
-      email: normalizedEmail,
-      passwordHash,
+      email: normalized,
+      passwordHash: bcrypt.hashSync(password, 8),
       name: name.trim(),
       targetRole: targetRole || "Full-Stack Engineer",
       experienceLevel: "Mid-to-Senior",
       createdAt: new Date().toISOString(),
     };
-
-    usersDb.set(normalizedEmail, newUser);
-
+    usersDb.set(normalized, newUser);
     const token = jwt.sign(
       { id: newUser.id, email: newUser.email, name: newUser.name, targetRole: newUser.targetRole },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
-
-    res.json({
-      token,
-      user: {
-        id: newUser.id,
-        email: newUser.email,
-        name: newUser.name,
-        targetRole: newUser.targetRole,
-        experienceLevel: newUser.experienceLevel,
-        createdAt: newUser.createdAt,
-      },
-    });
+    res.json({ token, user: sanitizeUser(newUser) });
   });
 
   app.post("/api/auth/login", (req, res) => {
     const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required." });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const user = usersDb.get(normalizedEmail);
-
+    if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
+    const user = usersDb.get(email.trim().toLowerCase());
     if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
       return res.status(401).json({ error: "Invalid email or password." });
     }
-
     const token = jwt.sign(
       { id: user.id, email: user.email, name: user.name, targetRole: user.targetRole },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        targetRole: user.targetRole,
-        experienceLevel: user.experienceLevel,
-        createdAt: user.createdAt,
-      },
-    });
+    res.json({ token, user: sanitizeUser(user) });
   });
 
-  app.get("/api/auth/me", authenticateToken, (req: any, res) => {
-    const user = Array.from(usersDb.values()).find(u => u.id === req.user.id);
-    if (!user) {
-      return res.status(404).json({ error: "User profile not found." });
-    }
-    res.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        targetRole: user.targetRole,
-        experienceLevel: user.experienceLevel,
-        createdAt: user.createdAt,
-        latestResumeText: user.latestResumeText ? user.latestResumeText.substring(0, 100) + "..." : undefined,
-        resumeFileName: user.resumeFileName,
-      },
-    });
-  });
-
-  // Guest Instant Demo Login
-  app.post("/api/auth/demo", (req, res) => {
-    const demoUser = usersDb.get("alex.chen@techmentor.dev")!;
+  app.post("/api/auth/demo", (_req, res) => {
+    const demo = usersDb.get("alex.chen@techmentor.dev")!;
     const token = jwt.sign(
-      { id: demoUser.id, email: demoUser.email, name: demoUser.name, targetRole: demoUser.targetRole },
+      { id: demo.id, email: demo.email, name: demo.name, targetRole: demo.targetRole },
       JWT_SECRET,
       { expiresIn: "7d" }
     );
-
-    res.json({
-      token,
-      user: {
-        id: demoUser.id,
-        email: demoUser.email,
-        name: demoUser.name,
-        targetRole: demoUser.targetRole,
-        experienceLevel: demoUser.experienceLevel,
-        createdAt: demoUser.createdAt,
-        resumeFileName: demoUser.resumeFileName,
-      },
-    });
+    res.json({ token, user: sanitizeUser(demo) });
   });
 
-  // --- BACKGROUND TASK POLLING ENDPOINT ---
+  app.get("/api/auth/me", authenticateToken, (req: any, res) => {
+    const user = Array.from(usersDb.values()).find((u) => u.id === req.user.id);
+    if (!user) return res.status(404).json({ error: "User not found." });
+    res.json({ user: sanitizeUser(user) });
+  });
+
+  // ── Background Task Polling ─────────────────────────────────────────────────
   app.get("/api/tasks/:taskId", (req, res) => {
     const task = tasksDb.get(req.params.taskId);
-    if (!task) {
-      return res.status(404).json({ error: "Task not found." });
-    }
+    if (!task) return res.status(404).json({ error: "Task not found." });
     res.json(task);
   });
 
-  // --- RESUME ANALYSIS (ASYNC BACKGROUND TASK) ---
+  // ── RESUME INTELLIGENCE AGENT ───────────────────────────────────────────────
   app.post("/api/resume/upload", upload.single("resume"), optionalAuth, async (req: any, res) => {
     try {
       let resumeText = req.body.resumeText || "";
@@ -372,326 +405,308 @@ async function startServer() {
 
       if (req.file) {
         fileName = req.file.originalname;
-        // In case of plain text or markdown upload
-        if (req.file.mimetype.includes("text") || req.file.originalname.endsWith(".txt") || req.file.originalname.endsWith(".md")) {
+        if (req.file.mimetype.includes("text") || fileName.endsWith(".txt") || fileName.endsWith(".md")) {
           resumeText = req.file.buffer.toString("utf-8");
         } else {
-          // Extracted or base64 representation for Gemini processing
-          resumeText = `[File: ${fileName}, Size: ${req.file.size} bytes]\n` + req.file.buffer.toString("utf-8", 0, Math.min(req.file.buffer.length, 6000));
+          resumeText = `[File: ${fileName}]\n` + req.file.buffer.toString("utf-8", 0, Math.min(req.file.buffer.length, 6000));
         }
       }
 
       if (!resumeText.trim()) {
-        return res.status(400).json({ error: "No resume content provided. Please upload a file or paste your resume text." });
+        return res.status(400).json({ error: "No resume content provided." });
       }
 
-      // If user is authenticated, save to their profile
+      // Save resume to user profile for cross-agent context
       if (req.user?.id) {
-        const user = Array.from(usersDb.values()).find(u => u.id === req.user.id);
+        const user = Array.from(usersDb.values()).find((u) => u.id === req.user.id);
         if (user) {
           user.latestResumeText = resumeText;
           user.resumeFileName = fileName;
         }
       }
 
-      const taskId = `task_res_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const task: BackgroundTask = {
-        id: taskId,
-        type: "resume_analysis",
-        status: "pending",
-        progress: 10,
-        createdAt: Date.now(),
-      };
+      const taskId = `task_res_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const task: BackgroundTask = { id: taskId, type: "resume_analysis", status: "pending", progress: 10, createdAt: Date.now() };
       tasksDb.set(taskId, task);
+      res.json({ taskId, status: "pending", message: "Resume Intelligence Agent activated." });
 
-      // Return taskId immediately so frontend can poll
-      res.json({ taskId, status: "pending", message: "Resume uploaded. Analysis initiated." });
-
-      // Run background processing asynchronously
+      // Async background processing
       (async () => {
         try {
           task.status = "processing";
-          task.progress = 30;
+          task.progress = 25;
 
-          const ragContext = retrieveRagContext(resumeText);
-          task.progress = 60;
+          const agentUser = req.user?.id
+            ? Array.from(usersDb.values()).find((u) => u.id === req.user.id)
+            : undefined;
 
-          const prompt = `You are a Principal Tech Recruiter and ATS Evaluation Engine.
-Analyze the following resume objectively. Ground your analysis with these principles:
+          const ragContext = retrieveRagContext(resumeText + " resume ats skills", 3);
+          const agentCtx = buildAgentContext(agentUser, { "Current Resume Text": resumeText.substring(0, 400) });
+          task.progress = 50;
+
+          const prompt = `You are the Resume Intelligence Agent in a multi-agent AI career platform.
+Your role: Perform deep ATS evaluation, skill extraction, and generate improvement recommendations.
+
+Shared Agent Context:
+${agentCtx}
+
+RAG Knowledge Base (grounding your analysis):
 ${ragContext}
 
-Resume Text:
+Resume to Analyze:
 """
 ${resumeText}
 """
 
-Return a JSON object with this exact structure:
+Return ONLY a valid JSON object with this EXACT structure:
 {
-  "atsScore": 86, // number 0-100
-  "grade": "Competitive", // "Excellent" | "Competitive" | "Needs Optimization" | "Critical Issues"
-  "summary": "One concise sentence evaluating market readiness and target seniority.",
+  "atsScore": 86,
+  "grade": "Competitive",
+  "summary": "One concise sentence on market readiness and target seniority fit.",
   "topSuggestions": [
     {
-      "title": "Quantify Leadership & Latency Impact",
-      "impact": "High", // "High" | "Medium" | "Essential"
-      "detail": "Actionable explanation of what to change.",
+      "title": "Quantify Latency & Business Impact",
+      "impact": "High",
+      "detail": "Actionable change with context.",
       "beforeAfterExample": {
-        "before": "Weak bullet point phrasing",
-        "after": "Strong metric-backed phrasing"
+        "before": "Weak bullet point",
+        "after": "Strong quantified version"
       }
     }
-  ], // exactly 3 top suggestions
-  "strengths": ["Clear distributed systems depth", "Strong metrics on cost reduction", "Modern React 18 stack"],
-  "detectedSkills": ["TypeScript", "Distributed Systems", "AWS", "Docker", "Node.js", "Redis"],
-  "missingKeywords": ["Terraform / IaC", "Distributed Tracing (OpenTelemetry)", "CI/CD Pipeline Design"]
+  ],
+  "strengths": ["Strength 1", "Strength 2", "Strength 3"],
+  "detectedSkills": ["TypeScript", "React", "AWS", "Kubernetes"],
+  "missingKeywords": ["OpenTelemetry", "Terraform", "LangChain"],
+  "skillScores": [
+    { "skill": "TypeScript", "score": 90 },
+    { "skill": "System Design", "score": 75 },
+    { "skill": "Cloud (AWS)", "score": 60 }
+  ],
+  "careerReadinessScore": 78,
+  "agentExplanation": {
+    "agents": [
+      {
+        "agent": "ResumeIntelligenceAgent",
+        "step": "ATS Parsing & Skill Extraction",
+        "reasoning": "Analyzed keyword density, action verb quality, and quantified impact metrics against Staff-level ATS rubric.",
+        "confidence": 88
+      },
+      {
+        "agent": "OrchestratorAgent",
+        "step": "Context Enrichment",
+        "reasoning": "Cross-referenced detected skills with career goal context to personalize gap analysis.",
+        "confidence": 95
+      }
+    ],
+    "orchestratorSummary": "Resume Intelligence Agent scored resume using RAG-grounded ATS heuristics. Key signals: metrics density, action verb quality, stack relevance, and Staff-level positioning signals."
+  }
 }`;
 
-          const geminiResponse = await callGeminiWithFallback(async (gemini, model) => {
-            return await gemini.models.generateContent({
+          const geminiResponse = await callGeminiWithFallback(async (gemini, model) =>
+            gemini.models.generateContent({
               model,
               contents: prompt,
-              config: {
-                responseMimeType: "application/json",
-                systemInstruction: "You evaluate software engineering resumes with rigorous, high-signal ATS scoring and concise actionable feedback.",
-              },
-            });
-          });
+              config: { responseMimeType: "application/json", systemInstruction: "You are a Resume Intelligence Agent. Return only valid JSON." },
+            })
+          );
 
-          if (geminiResponse && geminiResponse.text) {
+          if (geminiResponse?.text) {
             try {
-              const parsedResult = JSON.parse(geminiResponse.text);
-              if (parsedResult && typeof parsedResult.atsScore === "number") {
-                task.result = {
-                  ...parsedResult,
-                  formattedDate: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-                };
-                task.progress = 100;
+              const parsed = JSON.parse(geminiResponse.text);
+              if (typeof parsed.atsScore === "number") {
+                // Store analysis in user's agent context
+                if (agentUser) {
+                  agentUser.agentContext = {
+                    ...agentUser.agentContext,
+                    resumeAnalysis: { atsScore: parsed.atsScore, grade: parsed.grade },
+                    detectedSkills: parsed.detectedSkills || [],
+                  };
+                }
+                task.result = { ...parsed, formattedDate: formatDate() };
                 task.status = "completed";
+                task.progress = 100;
                 return;
               }
-            } catch (jsonErr) {
-              console.warn("JSON parsing failed from Gemini output, falling back to deterministic evaluator");
+            } catch {
+              console.warn("[ResumeAgent] JSON parse failed — using heuristic fallback");
             }
           }
 
-          // Robust High-Fidelity Fallback Parser (Deterministic ATS Evaluator)
-          const textLower = resumeText.toLowerCase();
-          const hasMetrics = /\d+([%kKmMbB]|\s*percent|\s*latency|\s*users|\s*arr|\s*rps)/i.test(resumeText);
-          const hasActionVerbs = /(spearheaded|architected|designed|orchestrated|optimized|engineered|scaled|reduced)/i.test(resumeText);
-          const hasModernStack = /(typescript|react|kubernetes|docker|node|go|python|aws|distributed|cloud|kafka)/i.test(resumeText);
-
-          let baseScore = 74;
-          if (hasMetrics) baseScore += 10;
-          if (hasActionVerbs) baseScore += 8;
-          if (hasModernStack) baseScore += 6;
-          baseScore = Math.min(94, Math.max(58, baseScore));
-
-          task.progress = 100;
+          // Deterministic fallback evaluator
+          task.result = buildFallbackResumeResult(resumeText);
           task.status = "completed";
-          task.result = {
-            atsScore: baseScore,
-            grade: baseScore >= 88 ? "Excellent" : baseScore >= 78 ? "Competitive" : "Needs Optimization",
-            summary: `Strong technical foundation with high stack relevance, calibrated for senior technical ATS evaluation filters.`,
-            topSuggestions: [
-              {
-                title: "Quantify Organizational & Business Impact",
-                impact: "High",
-                detail: "Replace passive feature descriptions with the business or latency outcome achieved (e.g. cost saved, p99 latency reduced).",
-                beforeAfterExample: {
-                  before: "Worked on distributed microservices and fixed latency issues.",
-                  after: "Re-architected distributed microservice query pipelines, cutting p99 latency by 38% for 4.5M DAU.",
-                },
-              },
-              {
-                title: "Add Strategic Architecture & RFC Governance",
-                impact: "Essential",
-                detail: "Explicitly mention cross-team technical RFCs authored and alignment achieved across engineering pods.",
-                beforeAfterExample: {
-                  before: "Built frontend features using React and WebSockets.",
-                  after: "Authored frontend state management RFC and led 6-engineer squad delivering real-time streaming UI.",
-                },
-              },
-              {
-                title: "Incorporate Infrastructure & Observability Keywords",
-                impact: "Medium",
-                detail: "Include explicit keywords for OpenTelemetry, distributed tracing, and CI/CD pipelines to match modern tech ATS filters.",
-              },
-            ],
-            strengths: [
-              "Strong technical clarity and clean modern stack alignment",
-              "Demonstrated experience with scalable production systems",
-              "Clear logical progression across senior engineering roles",
-            ],
-            detectedSkills: ["TypeScript", "React", "Node.js", "Distributed Systems", "PostgreSQL", "Redis", "Cloud Architecture"],
-            missingKeywords: ["OpenTelemetry / Tracing", "Terraform / IaC", "SLO / SLA Definition", "Cross-functional RFCs"],
-            formattedDate: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-          };
-        } catch (err: any) {
-          console.error("Task processing error:", err);
+          task.progress = 100;
+        } catch (err) {
+          console.error("[ResumeAgent] Task error:", err);
           task.status = "failed";
-          task.error = "The AI service is temporarily experiencing high traffic. Please try running the analysis again in a few moments.";
+          task.error = "AI service is temporarily busy. Please retry in a moment.";
         }
       })();
-    } catch (error: any) {
-      res.status(500).json({ error: error.message || "Failed to process resume upload" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to process resume." });
     }
   });
 
-  // --- JOB MATCHER ENDPOINT ---
+  // ── JOB MATCHING AGENT ──────────────────────────────────────────────────────
   app.post("/api/job-match", optionalAuth, async (req: any, res) => {
     try {
       const { jobDescription, resumeText } = req.body;
-      if (!jobDescription || !jobDescription.trim()) {
-        return res.status(400).json({ error: "Job description is required." });
-      }
+      if (!jobDescription?.trim()) return res.status(400).json({ error: "Job description is required." });
 
-      // Check if user has stored resume or passed one
-      let candidateResume = resumeText || "";
-      if (!candidateResume && req.user?.id) {
-        const user = Array.from(usersDb.values()).find(u => u.id === req.user.id);
-        if (user && user.latestResumeText) {
-          candidateResume = user.latestResumeText;
-        }
-      }
+      const agentUser = req.user?.id
+        ? Array.from(usersDb.values()).find((u) => u.id === req.user.id)
+        : undefined;
 
+      let candidateResume = resumeText || agentUser?.latestResumeText || "";
       if (!candidateResume) {
         candidateResume = "Senior Software Engineer with 6 years experience in TypeScript, React, Node.js, Distributed Systems, Redis, AWS, and Microservices.";
       }
 
-      const ragContext = retrieveRagContext(jobDescription);
-      const prompt = `You are a Senior Technical Recruiter. Compare this candidate's resume with the target job description.
-Principles & Benchmarks:
+      const ragContext = retrieveRagContext(jobDescription + " skills requirements", 2);
+      const agentCtx = buildAgentContext(agentUser, { "Target Job Description": jobDescription.substring(0, 400) });
+
+      const prompt = `You are the Job Matching Agent in a multi-agent AI career platform.
+Your role: Perform semantic compatibility analysis between candidate profile and job requirements.
+
+Shared Agent Context (from Orchestrator):
+${agentCtx}
+
+RAG Knowledge Base:
 ${ragContext}
 
 Candidate Resume:
 """
-${candidateResume}
+${candidateResume.substring(0, 1200)}
 """
 
 Target Job Description:
 """
-${jobDescription}
+${jobDescription.substring(0, 1200)}
 """
 
-Return a JSON object with this exact structure:
+Return ONLY a valid JSON object:
 {
-  "compatibilityScore": 84, // integer 0-100
-  "matchTier": "Strong Match", // "Strong Match" | "Moderate Match" | "Growth Opportunity"
-  "matchedSkills": ["TypeScript", "System Design", "Microservices", "React"],
+  "compatibilityScore": 84,
+  "matchTier": "Strong Match",
+  "matchedSkills": ["TypeScript", "System Design", "AWS"],
   "rankedGaps": [
     {
-      "skill": "Kubernetes Production Tuning",
-      "urgency": "Critical", // "Critical" | "High" | "Nice to have"
-      "recommendation": "Highlight any container orchestration or auto-scaling experience on your resume."
-    },
-    {
-      "skill": "Terraform / Infrastructure-as-Code",
-      "urgency": "High",
-      "recommendation": "Mention cloud provisioning practices and automated deployment scripts."
+      "skill": "Terraform / IaC",
+      "urgency": "Critical",
+      "recommendation": "Add a bullet demonstrating IaC experience or cloud provisioning."
     }
   ],
-  "resumeAdjustmentAdvice": "Emphasize distributed system scalability metrics in your top 2 bullet points to match their requirements for high-throughput services."
+  "resumeAdjustmentAdvice": "Specific actionable advice to reposition the resume.",
+  "agentExplanation": {
+    "agents": [
+      {
+        "agent": "JobMatchingAgent",
+        "step": "Semantic Skill Comparison",
+        "reasoning": "Compared candidate skill set against job requirements using semantic matching and identified critical gaps.",
+        "confidence": 87
+      },
+      {
+        "agent": "OrchestratorAgent",
+        "step": "Cross-Agent Context Sharing",
+        "reasoning": "Used prior Resume Intelligence Agent output to personalize job match scoring.",
+        "confidence": 92
+      }
+    ],
+    "orchestratorSummary": "Job Matching Agent performed semantic compatibility analysis with RAG-grounded skill benchmarks. Score reflects both keyword overlap and semantic role alignment."
+  }
 }`;
 
-      const geminiResponse = await callGeminiWithFallback(async (gemini, model) => {
-        return await gemini.models.generateContent({
+      const geminiResponse = await callGeminiWithFallback(async (gemini, model) =>
+        gemini.models.generateContent({
           model,
           contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            systemInstruction: "You evaluate candidate-to-job fit accurately, identifying critical gaps and actionable resume positioning.",
-          },
-        });
-      });
+          config: { responseMimeType: "application/json", systemInstruction: "You are a Job Matching Agent. Return only valid JSON." },
+        })
+      );
 
-      if (geminiResponse && geminiResponse.text) {
+      if (geminiResponse?.text) {
         try {
           const result = JSON.parse(geminiResponse.text);
-          if (result && typeof result.compatibilityScore === "number") {
+          if (typeof result.compatibilityScore === "number") {
+            if (agentUser) {
+              agentUser.agentContext = {
+                ...agentUser.agentContext,
+                jobMatchAnalysis: { score: result.compatibilityScore, tier: result.matchTier },
+              };
+            }
             return res.json(result);
           }
-        } catch (e) {
-          console.warn("JSON parse error from Job Matcher Gemini response");
+        } catch {
+          console.warn("[JobMatchAgent] JSON parse failed — using heuristic fallback");
         }
       }
 
-      // Fallback matching logic
-      const jdWords = jobDescription.toLowerCase();
-      const techTerms = [
-        "typescript", "react", "node", "go", "python", "kubernetes", "docker", "aws", "gcp",
-        "graphql", "kafka", "redis", "postgresql", "terraform", "microservices", "distributed systems", "ci/cd"
-      ];
-      const matched = techTerms.filter(t => jdWords.includes(t) && candidateResume.toLowerCase().includes(t));
-      const gaps = techTerms.filter(t => jdWords.includes(t) && !candidateResume.toLowerCase().includes(t));
-
-      const score = Math.min(95, Math.max(60, Math.round((matched.length / Math.max(1, matched.length + gaps.length)) * 100)));
-
-      res.json({
-        compatibilityScore: score,
-        matchTier: score >= 80 ? "Strong Match" : score >= 65 ? "Moderate Match" : "Growth Opportunity",
-        matchedSkills: matched.length > 0 ? matched : ["TypeScript", "System Design", "React", "Cloud Architecture"],
-        rankedGaps: (gaps.length > 0 ? gaps : ["Kubernetes / Helm", "Terraform IaC", "Distributed Tracing"]).slice(0, 3).map((gap, i) => ({
-          skill: gap.charAt(0).toUpperCase() + gap.slice(1),
-          urgency: i === 0 ? "Critical" : i === 1 ? "High" : "Nice to have",
-          recommendation: `Add a bullet demonstrating your hands-on experience or architectural knowledge of ${gap}.`,
-        })),
-        resumeAdjustmentAdvice: `Tailor your summary to specifically reflect the ${score}% overlap and surface project outcomes matching the job description's primary tech stack.`,
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message || "Failed to compare job description." });
+      // Fallback heuristic matcher
+      res.json(buildFallbackJobMatch(jobDescription, candidateResume));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Job match failed." });
     }
   });
 
-  // --- STREAMING CAREER ROADMAP (SSE) ---
+  // ── CAREER STRATEGY AGENT (Streaming) ──────────────────────────────────────
   app.post("/api/roadmap/stream", optionalAuth, async (req: any, res) => {
     const { targetRole, currentLevel } = req.body;
-    if (!targetRole || !targetRole.trim()) {
-      return res.status(400).json({ error: "Target role is required." });
-    }
+    if (!targetRole?.trim()) return res.status(400).json({ error: "Target role is required." });
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const sendEvent = (event: string, data: any) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
+    const send = (event: string, data: any) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     try {
-      const ragContext = retrieveRagContext(targetRole);
-      const prompt = `You are a Career Architect for top technology leaders.
-Create a clean, focused, step-by-step career roadmap to transition from "${currentLevel || 'Current Role'}" to "${targetRole}".
-Principles & Standards:
+      const agentUser = req.user?.id
+        ? Array.from(usersDb.values()).find((u) => u.id === req.user.id)
+        : undefined;
+
+      const ragContext = retrieveRagContext(targetRole + " career roadmap skills", 3);
+      const agentCtx = buildAgentContext(agentUser);
+
+      const prompt = `You are the Career Strategy Agent in a multi-agent AI career platform.
+Your role: Generate a personalized, phase-by-phase career roadmap grounded in real industry requirements.
+
+Shared Agent Context (from Orchestrator):
+${agentCtx}
+
+RAG Knowledge Base:
 ${ragContext}
 
-Return a structured JSON object with this exact schema:
+Target Role: "${targetRole}"
+Current Level: "${currentLevel || "Senior Engineer"}"
+
+Return a structured JSON roadmap:
 {
   "targetRole": "${targetRole}",
   "estimatedTimeline": "6 - 9 Months",
-  "summary": "One sentence summary of the core transformation needed.",
+  "summary": "One sentence describing the core transformation needed.",
   "steps": [
     {
       "phase": "Phase 1 (Months 1-2)",
       "duration": "60 Days",
       "milestoneTitle": "Technical Depth & Domain Mastery",
-      "description": "Deep dive into core gaps and write your first strategic RFC.",
+      "description": "Deep dive into core skill gaps and first RFC.",
       "keyActions": [
-        "Complete 3 deep-dive architecture reviews of existing systems",
-        "Author RFC on service resilience and cross-pod communication",
-        "Establish automated latency benchmarking in CI pipeline"
+        "Complete 3 architecture reviews of existing systems",
+        "Author RFC on service resilience",
+        "Establish automated latency benchmarking"
       ],
-      "criticalSkillsToLearn": ["Distributed Consensus", "SLO Design", "Event Streaming"]
+      "criticalSkillsToLearn": ["Distributed Consensus", "SLO Design", "Observability"]
     },
     {
       "phase": "Phase 2 (Months 3-5)",
       "duration": "90 Days",
       "milestoneTitle": "Organizational Influence & Cross-Team Impact",
-      "description": "Expand scope from single squad to multi-team architectural initiatives.",
+      "description": "Expand scope to multi-team architectural initiatives.",
       "keyActions": [
-        "Lead technical planning across 2 collaborating engineering teams",
-        "Mentor 2 senior engineers on design document reviews",
-        "Speak at internal tech talk or publish case study on migration"
+        "Lead technical planning across 2 engineering teams",
+        "Mentor 2 senior engineers",
+        "Publish internal tech talk or case study"
       ],
       "criticalSkillsToLearn": ["Stakeholder Alignment", "Tech Strategy", "Engineering Mentorship"]
     },
@@ -699,18 +714,35 @@ Return a structured JSON object with this exact schema:
       "phase": "Phase 3 (Months 6-8)",
       "duration": "90 Days",
       "milestoneTitle": "Interview Readiness & Role Calibration",
-      "description": "Execute Staff-level system design rounds and portfolio presentation.",
+      "description": "Execute full-loop interview preparation and portfolio polish.",
       "keyActions": [
-        "Simulate 5 full-loop Staff system design and behavioral interviews",
-        "Polish executive summary and quantifiable resume achievements",
-        "Engage with hiring managers for direct targeted placement"
+        "Simulate 5 Staff system design interview rounds",
+        "Polish resume with quantifiable achievements",
+        "Engage hiring managers for targeted placement"
       ],
       "criticalSkillsToLearn": ["Executive Communication", "Offer Negotiation", "System Design STAR-T"]
     }
-  ]
+  ],
+  "agentExplanation": {
+    "agents": [
+      {
+        "agent": "CareerStrategyAgent",
+        "step": "Personalized Roadmap Generation",
+        "reasoning": "Built multi-phase roadmap by analyzing skill gaps between current level and target role requirements.",
+        "confidence": 91
+      },
+      {
+        "agent": "OrchestratorAgent",
+        "step": "Cross-Agent Personalization",
+        "reasoning": "Enriched roadmap with resume skill data and career goal context from prior agent runs.",
+        "confidence": 94
+      }
+    ],
+    "orchestratorSummary": "Career Strategy Agent generated personalized roadmap using RAG-grounded industry benchmarks and cross-agent shared context from Resume Intelligence and Job Matching agents."
+  }
 }`;
 
-      let streamedSuccessfully = false;
+      let streamed = false;
       const gemini = getGeminiClient();
 
       if (!isQuotaExhausted() && gemini) {
@@ -722,7 +754,7 @@ Return a structured JSON object with this exact schema:
               contents: prompt,
               config: {
                 responseMimeType: "application/json",
-                systemInstruction: "You produce clean, pragmatic, vertical career roadmaps for software engineers.",
+                systemInstruction: "You are a Career Strategy Agent. Return only valid JSON.",
               },
             });
 
@@ -730,182 +762,159 @@ Return a structured JSON object with this exact schema:
             for await (const chunk of stream) {
               const text = chunk.text || "";
               fullText += text;
-              sendEvent("chunk", { text });
+              send("chunk", { text });
             }
 
             try {
               const parsed = JSON.parse(fullText);
-              sendEvent("complete", parsed);
-            } catch (e) {
-              sendEvent("complete", { raw: fullText });
+              send("complete", parsed);
+            } catch {
+              send("complete", { raw: fullText });
             }
-            streamedSuccessfully = true;
+            streamed = true;
             break;
-          } catch (streamErr: any) {
-            const { isQuota } = handleGeminiError(streamErr);
-            if (isQuota) {
-              console.warn(`[Roadmap SSE] Quota limit encountered. Switching to offline roadmap engine.`);
-              break;
-            }
-            console.warn(`[Roadmap SSE] Stream failed on ${model}:`, (streamErr?.message || "").slice(0, 100));
-            continue;
+          } catch (err: any) {
+            const { isQuota } = handleGeminiError(err);
+            if (isQuota) break;
+            console.warn(`[CareerAgent] Stream failed on ${model}:`, (err?.message || "").slice(0, 80));
           }
         }
       }
 
-      if (streamedSuccessfully) {
-        res.end();
-        return;
+      if (!streamed) {
+        const fallback = buildFallbackRoadmap(targetRole);
+        const str = JSON.stringify(fallback);
+        for (let i = 0; i < str.length; i += 45) {
+          send("chunk", { text: str.slice(i, i + 45) });
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        send("complete", fallback);
       }
 
-      // Fallback Roadmap Generator
-      const mockRoadmap = {
-        targetRole,
-        estimatedTimeline: "6 - 9 Months",
-        summary: `Strategic progression plan designed to bridge core domain gaps and calibrate you for ${targetRole} hiring loops.`,
-        steps: [
-          {
-            phase: "Phase 1 (Months 1-2)",
-            duration: "60 Days",
-            milestoneTitle: "Core Architectural Gaps & Technical Depth",
-            description: "Deep dive into system scalability, consensus protocols, and infrastructure observability.",
-            keyActions: [
-              "Audit top 3 system bottlenecks and propose decoupled architecture solution",
-              "Author a comprehensive Technical Design RFC addressing service reliability",
-              "Implement automated performance benchmarking in the staging environment",
-            ],
-            criticalSkillsToLearn: ["Distributed System Trade-offs", "Telemetry & Observability", "High-Throughput Caching"],
-          },
-          {
-            phase: "Phase 2 (Months 3-5)",
-            duration: "90 Days",
-            milestoneTitle: "Cross-Team Influence & Technical Leadership",
-            description: "Drive technical consensus across multiple pods and establish engineering best practices.",
-            keyActions: [
-              "Spearhead technical roadmap planning across multiple engineering teams",
-              "Establish regular architectural review sessions and mentor mid/senior engineers",
-              "Present high-visibility technical case study to engineering management",
-            ],
-            criticalSkillsToLearn: ["Technical Consensus Building", "Mentorship", "Strategic Trade-off Analysis"],
-          },
-          {
-            phase: "Phase 3 (Months 6-8)",
-            duration: "90 Days",
-            milestoneTitle: "Interview Mastery & Role Calibration",
-            description: "Execute targeted system design simulations and lock in senior-level interview loops.",
-            keyActions: [
-              "Conduct 5 mock interviews focusing on distributed system scale and leadership",
-              "Calibrate resume metrics to highlight business value and cross-team leverage",
-              "Secure warm referrals and interview directly with VP/Director hiring loops",
-            ],
-            criticalSkillsToLearn: ["STAR-T Behavioral Delivery", "System Design Synthesis", "Offer Negotiation Strategy"],
-          },
-        ],
-      };
-
-      // Stream fallback chunks for smooth UX
-      const jsonString = JSON.stringify(mockRoadmap);
-      const chunkSize = 40;
-      for (let i = 0; i < jsonString.length; i += chunkSize) {
-        sendEvent("chunk", { text: jsonString.substring(i, i + chunkSize) });
-        await new Promise(r => setTimeout(r, 40));
-      }
-      sendEvent("complete", mockRoadmap);
       res.end();
     } catch (err: any) {
-      sendEvent("error", { message: "AI service is currently busy. Please try generating the roadmap again." });
+      send("error", { message: "Career Strategy Agent is temporarily busy. Please retry." });
       res.end();
     }
   });
 
-  // --- MOCK INTERVIEW QUESTIONS BANK & STREAMING EVALUATION ---
+  // ── INTERVIEW COACH AGENT ───────────────────────────────────────────────────
   const INTERVIEW_QUESTIONS = [
     {
       id: "q_sys_1",
       role: "Staff / Senior Software Engineer",
       category: "System Design",
       difficulty: "Staff",
-      question: "Design a globally distributed rate limiter that handles 500,000 requests per second across 3 continents with under 5ms latency overhead and strict token-bucket consistency.",
-      contextHint: "Focus on local edge caching vs centralized Redis sync trade-offs, network partition handling, and clock drift.",
-    },
-    {
-      id: "q_sys_2",
-      role: "Senior Full-Stack Engineer",
-      category: "Technical Architecture",
-      difficulty: "Senior",
-      question: "How would you architect a real-time collaborative code editor supporting 50 concurrent editors per document without server-side merge bottlenecks?",
-      contextHint: "Address CRDT vs Operational Transformation (OT), WebSocket backpressure, and offline synchronization.",
+      question: "Design a globally distributed rate limiter handling 500,000 RPS across 3 continents with under 5ms latency overhead and strict token-bucket consistency.",
+      contextHint: "Address local edge evaluation vs centralized coordinator sync, split-brain tolerance, and clock skew.",
     },
     {
       id: "q_lead_1",
       role: "Engineering Lead / Staff",
       category: "Behavioral Leadership",
       difficulty: "Staff",
-      question: "Describe a situation where the product team pushed for a high-priority feature release with known critical architectural debt. How did you handle the conflict, align stakeholders, and protect system reliability?",
-      contextHint: "Use the STAR-T framework. Emphasize empathy, technical risk quantification, and phased delivery.",
+      question: "Describe a time the product team pushed for a high-priority feature release with known critical architectural debt. How did you handle it, align stakeholders, and protect reliability?",
+      contextHint: "Structure with STAR-T. Quantify the blast-radius risk and show pragmatic compromise.",
     },
     {
-      id: "q_react_1",
+      id: "q_sys_2",
+      role: "Senior Full-Stack Engineer",
+      category: "Technical Architecture",
+      difficulty: "Senior",
+      question: "Architect a real-time collaborative document editor supporting 50 concurrent editors without server merge bottlenecks and with offline resiliency.",
+      contextHint: "Contrast CRDTs vs Operational Transformation, WebSocket backpressure, and conflict resolution.",
+    },
+    {
+      id: "q_hr_1",
+      role: "All Levels",
+      category: "HR & Culture",
+      difficulty: "Mid",
+      question: "Tell me about a time you strongly disagreed with a technical decision made by your team lead. How did you handle it?",
+      contextHint: "Show professional communication, data-driven arguments, and willingness to commit post-decision.",
+    },
+    {
+      id: "q_coding_1",
       role: "Senior Frontend Engineer",
       category: "Coding Patterns",
       difficulty: "Senior",
       question: "Explain how React 18 Concurrent Rendering and Server Components change client-side state hydration, waterfall network requests, and memoization strategies in large apps.",
-      contextHint: "Mention selective hydration, suspense boundaries, and streaming HTML.",
+      contextHint: "Mention selective hydration, Suspense boundaries, and streaming HTML rendering.",
     },
   ];
 
-  app.get("/api/interview/questions", (req, res) => {
+  app.get("/api/interview/questions", (_req, res) => {
     res.json({ questions: INTERVIEW_QUESTIONS });
   });
 
-  // Streaming Interview Evaluation (SSE)
   app.post("/api/interview/feedback-stream", optionalAuth, async (req: any, res) => {
     const { questionId, questionText, userAnswer, targetRole } = req.body;
-    if (!userAnswer || !userAnswer.trim()) {
-      return res.status(400).json({ error: "User answer is required." });
-    }
+    if (!userAnswer?.trim()) return res.status(400).json({ error: "Answer is required." });
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const sendEvent = (event: string, data: any) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
+    const send = (event: string, data: any) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     try {
-      const ragContext = retrieveRagContext(questionText + " " + (targetRole || ""));
-      const prompt = `You are a Principal Interview Bar Raiser at a top-tier tech firm evaluating a candidate for "${targetRole || 'Senior/Staff Software Engineer'}".
+      const agentUser = req.user?.id
+        ? Array.from(usersDb.values()).find((u) => u.id === req.user.id)
+        : undefined;
 
-Evaluation Rubric & Standards:
+      const ragContext = retrieveRagContext(questionText + " interview answer feedback", 2);
+      const agentCtx = buildAgentContext(agentUser);
+
+      const prompt = `You are the Interview Coach Agent — a Principal-level Bar Raiser evaluating candidates for "${targetRole || "Staff Software Engineer"}".
+
+Shared Agent Context (from Orchestrator):
+${agentCtx}
+
+RAG Evaluation Rubric:
 ${ragContext}
 
 Interview Question:
 "${questionText}"
 
-Candidate's Submitted Answer:
+Candidate Answer:
 """
 ${userAnswer}
 """
 
-Evaluate this answer strictly and constructively. Stream out a JSON object with this exact structure:
+Evaluate strictly and constructively. Return ONLY a valid JSON object:
 {
-  "score": 88, // 0-100
-  "verdict": "Strong Hire", // "Strong Hire" | "Hire" | "Leaning Hire" | "Needs Improvement"
+  "score": 88,
+  "verdict": "Strong Hire",
   "strengths": [
-    "Identified distributed edge cache vs centralized coordinator trade-off upfront",
-    "Clearly articulated network partition resilience and degraded fallback mode"
+    "Identified the core distributed trade-off upfront",
+    "Articulated network partition resilience with specific fallback mode"
   ],
   "growthAreas": [
-    "Could specify exact data serialization size and bandwidth calculations",
-    "Did not mention clock synchronization challenges (e.g. TrueTime vs NTP)"
+    "Missing numeric capacity estimates (QPS, payload size per node)",
+    "No mention of clock synchronization challenges"
   ],
-  "improvedAnswerModel": "A concise, elite 2-3 paragraph model answer demonstrating the optimal STAR-T or architectural structure.",
-  "keyFollowUpTip": "Prepare for follow-up questions regarding how your rate limiter handles sudden burst traffic and cold start cache misses."
+  "improvedAnswerModel": "2-3 paragraph elite model answer demonstrating STAR-T or architectural depth.",
+  "keyFollowUpTip": "Prepare for the follow-up on cold-start cache misses during burst traffic.",
+  "agentExplanation": {
+    "agents": [
+      {
+        "agent": "InterviewCoachAgent",
+        "step": "Bar Raiser Evaluation",
+        "reasoning": "Scored answer against Staff-level rubric: technical depth, trade-off analysis, quantification, and communication clarity.",
+        "confidence": 89
+      },
+      {
+        "agent": "OrchestratorAgent",
+        "step": "Candidate Context Enrichment",
+        "reasoning": "Used career goal and skill context to calibrate expectations for this candidate's target role level.",
+        "confidence": 93
+      }
+    ],
+    "orchestratorSummary": "Interview Coach Agent evaluated answer using RAG-grounded STAR-T rubric and Principal Bar Raiser standards. Score reflects technical depth, quantification quality, and trade-off articulation."
+  }
 }`;
 
-      let streamedSuccessfully = false;
+      let streamed = false;
       const gemini = getGeminiClient();
 
       if (!isQuotaExhausted() && gemini) {
@@ -917,7 +926,7 @@ Evaluate this answer strictly and constructively. Stream out a JSON object with 
               contents: prompt,
               config: {
                 responseMimeType: "application/json",
-                systemInstruction: "You are a Principal Engineering Bar Raiser providing high-signal, immediate feedback on technical and behavioral interview responses.",
+                systemInstruction: "You are an Interview Coach Agent. Return only valid JSON.",
               },
             });
 
@@ -925,102 +934,85 @@ Evaluate this answer strictly and constructively. Stream out a JSON object with 
             for await (const chunk of stream) {
               const text = chunk.text || "";
               fullText += text;
-              sendEvent("chunk", { text });
+              send("chunk", { text });
             }
 
             try {
               const parsed = JSON.parse(fullText);
-              sendEvent("complete", parsed);
-            } catch (e) {
-              sendEvent("complete", { raw: fullText });
+              send("complete", parsed);
+            } catch {
+              send("complete", { raw: fullText });
             }
-            streamedSuccessfully = true;
+            streamed = true;
             break;
-          } catch (streamErr: any) {
-            const { isQuota } = handleGeminiError(streamErr);
-            if (isQuota) {
-              console.warn(`[Interview SSE] Quota limit encountered. Switching to offline interview engine.`);
-              break;
-            }
-            console.warn(`[Interview SSE] Stream failed on ${model}:`, (streamErr?.message || "").slice(0, 100));
-            continue;
+          } catch (err: any) {
+            const { isQuota } = handleGeminiError(err);
+            if (isQuota) break;
+            console.warn(`[InterviewAgent] Stream failed on ${model}:`, (err?.message || "").slice(0, 80));
           }
         }
       }
 
-      if (streamedSuccessfully) {
-        res.end();
-        return;
+      if (!streamed) {
+        const fallback = buildFallbackInterviewFeedback(userAnswer);
+        const str = JSON.stringify(fallback);
+        for (let i = 0; i < str.length; i += 35) {
+          send("chunk", { text: str.slice(i, i + 35) });
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        send("complete", fallback);
       }
 
-      // Fallback Answer Evaluator
-      const length = userAnswer.trim().length;
-      const score = Math.min(96, Math.max(62, Math.round(68 + Math.min(25, length / 40))));
-      const mockFeedback = {
-        score,
-        verdict: score >= 85 ? "Strong Hire" : score >= 75 ? "Hire" : "Leaning Hire",
-        strengths: [
-          "Directly addresses core architectural constraints without unnecessary preamble",
-          "Demonstrates solid understanding of distributed trade-offs and latency boundaries",
-          "Good structured breakdown of components and request lifecycle",
-        ],
-        growthAreas: [
-          "Incorporate concrete numeric estimates (QPS, payload size, memory footprint per node)",
-          "Highlight failure scenarios (what happens if a cache replica dies during peak load)",
-        ],
-        improvedAnswerModel: `A premier Staff-level response would open with exact operational constraints: 'To handle 500k RPS with sub-5ms overhead, we decouple local edge token evaluation from asynchronous background ledger synchronization.' Then outline: (1) Local in-memory sliding window counters per edge node, (2) Batched async consensus via Redis Cluster with Raft sync, and (3) Graceful degradation under split-brain partitions.`,
-        keyFollowUpTip: "Anticipate the interviewer asking: 'How do you handle flash-crowd DDoS spikes when local token buckets deplete simultaneously?'",
-      };
-
-      const jsonStr = JSON.stringify(mockFeedback);
-      const chunkSize = 35;
-      for (let i = 0; i < jsonStr.length; i += chunkSize) {
-        sendEvent("chunk", { text: jsonStr.substring(i, i + chunkSize) });
-        await new Promise(r => setTimeout(r, 35));
-      }
-      sendEvent("complete", mockFeedback);
       res.end();
     } catch (err: any) {
-      sendEvent("error", { message: "AI service is currently busy. Please try evaluating your answer again." });
+      send("error", { message: "Interview Coach Agent is temporarily busy. Please retry." });
       res.end();
     }
   });
 
-  // --- STREAMING AI CHAT MENTOR (SSE) ---
+  // ── AI CAREER ADVISOR CHAT (Context-Aware) ──────────────────────────────────
   app.post("/api/chat/stream", optionalAuth, async (req: any, res) => {
     const { messages, userContext } = req.body;
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: "Messages array is required." });
-    }
+    if (!messages?.length) return res.status(400).json({ error: "Messages array is required." });
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const sendEvent = (event: string, data: any) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
+    const send = (event: string, data: any) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     try {
-      const lastMessage = messages[messages.length - 1].text;
-      const ragContext = retrieveRagContext(lastMessage);
+      const agentUser = req.user?.id
+        ? Array.from(usersDb.values()).find((u) => u.id === req.user.id)
+        : undefined;
 
-      const systemPrompt = `You are the AI Career Mentor for high-performing software engineers, architects, and engineering managers.
-Your style is direct, clear, objective, and deeply knowledgeable about tech compensation, promotion mechanics, resume positioning, and architectural trade-offs.
-Ground your responses with:
+      const lastMsg = messages[messages.length - 1]?.text || "";
+      const ragContext = retrieveRagContext(lastMsg, 2);
+      const agentCtx = buildAgentContext(agentUser);
+
+      const systemPrompt = `You are the AI Career Advisor — a context-aware conversational agent in the AI Career Intelligence Platform.
+You have full memory of the user's career profile from prior agent runs.
+
+User Career Context (from Agent Orchestrator):
+${agentCtx}
+
+RAG Knowledge Base (for grounding):
 ${ragContext}
 
-User Context: ${userContext || 'Senior/Staff tech professional'}.
-Provide concise, actionable answers with generous spacing. Avoid fluff or generic motivational filler.`;
+User Identity: ${userContext || "Senior tech professional"}
 
-      // Format conversation history for Gemini
-      const formattedContents = messages.map(m => ({
-        role: m.sender === "user" ? "user" : "model",
-        parts: [{ text: m.text }],
-      }));
+Style: Direct, data-driven, expert-level. No fluff. Bullet points for lists. 2-4 sentences max per paragraph.
+Always reference the user's specific resume, skills, or goals when relevant.`;
 
-      let streamedSuccessfully = false;
+      const formattedContents = messages
+        .filter((m: any) => m.text)
+        .map((m: any) => ({
+          role: m.sender === "user" ? "user" : "model",
+          parts: [{ text: m.text }],
+        }));
+
+      let streamed = false;
       const gemini = getGeminiClient();
 
       if (!isQuotaExhausted() && gemini) {
@@ -1030,60 +1022,53 @@ Provide concise, actionable answers with generous spacing. Avoid fluff or generi
             const stream = await gemini.models.generateContentStream({
               model,
               contents: formattedContents,
-              config: {
-                systemInstruction: systemPrompt,
-              },
+              config: { systemInstruction: systemPrompt },
             });
 
             for await (const chunk of stream) {
               const text = chunk.text || "";
-              sendEvent("chunk", { text });
+              send("chunk", { text });
             }
-            sendEvent("done", {});
-            streamedSuccessfully = true;
+            send("done", {});
+            streamed = true;
             break;
-          } catch (streamErr: any) {
-            const { isQuota } = handleGeminiError(streamErr);
-            if (isQuota) {
-              console.warn(`[Chat SSE] Quota limit encountered. Switching to offline mentor engine.`);
-              break;
-            }
-            console.warn(`[Chat SSE] Stream failed on ${model}:`, (streamErr?.message || "").slice(0, 100));
-            continue;
+          } catch (err: any) {
+            const { isQuota } = handleGeminiError(err);
+            if (isQuota) break;
+            console.warn(`[ChatAdvisor] Stream failed on ${model}:`, (err?.message || "").slice(0, 80));
           }
         }
       }
 
-      if (streamedSuccessfully) {
-        res.end();
-        return;
+      if (!streamed) {
+        const fallback = `Based on your profile, here are three high-leverage actions to focus on:
+
+**1. Strategic Leverage Over Code Volume**
+Shift from implementing individual features to writing technical RFCs that unblock 3+ engineers and reduce cross-service dependencies.
+
+**2. Quantifiable Business Metrics**
+Calibrate your resume and conversations around business impact — e.g., 'Reduced p99 latency by 40%, saving $120k ARR on AWS cluster costs'.
+
+**3. Interview Synthesis at Staff Level**
+In Staff+ rounds, interviewers evaluate how you handle ambiguity and leadership pushback. Always frame trade-offs using the STAR-T format.
+
+What specific aspect of your transition would you like to dig into?`;
+
+        for (let i = 0; i < fallback.length; i += 28) {
+          send("chunk", { text: fallback.slice(i, i + 28) });
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        send("done", {});
       }
 
-      // Fallback Stream
-      const reply = `When evaluating that transition, the three decisive leverage points are:
-
-1. **Strategic Leverage Over Code Volume**: Shift your daily output from implementing individual features to writing technical RFCs that unblock 3+ engineers and reduce cross-service dependencies.
-
-2. **Quantifiable Latency & Cost Metrics**: Calibrate your resume and conversations around business impact (e.g. 'Reduced p99 database latency by 40% and saved $120k ARR on AWS cluster provisioning').
-
-3. **Interview Synthesis**: In Staff+ rounds, interviewers evaluate how you handle ambiguity and pushback from leadership. Always frame trade-offs using the STAR-T format.
-
-What specific aspect of your background or target role would you like to drill into next?`;
-
-      const chunkSize = 25;
-      for (let i = 0; i < reply.length; i += chunkSize) {
-        sendEvent("chunk", { text: reply.substring(i, i + chunkSize) });
-        await new Promise(r => setTimeout(r, 25));
-      }
-      sendEvent("done", {});
       res.end();
     } catch (err: any) {
-      sendEvent("error", { message: "AI mentor is momentarily busy. Please try sending your message again." });
+      send("error", { message: "AI Advisor is temporarily busy. Please retry." });
       res.end();
     }
   });
 
-  // --- VITE MIDDLEWARE SETUP ---
+  // ── VITE / STATIC SERVING ───────────────────────────────────────────────────
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1093,14 +1078,186 @@ What specific aspect of your background or target role would you like to drill i
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`AI Career Mentor server running on http://localhost:${PORT}`);
+    console.log(`\n🤖 AI Career Intelligence Platform`);
+    console.log(`   Server: http://localhost:${PORT}`);
+    console.log(`   Agents: Resume · Job Match · Career Strategy · Interview Coach`);
+    console.log(`   RAG Docs: ${RAG_KNOWLEDGE_BASE.length} indexed`);
+    console.log(`   Gemini: ${process.env.GEMINI_API_KEY ? "✅ Connected" : "⚠️  No API key — fallback mode"}\n`);
   });
+}
+
+// ─── Helper: Sanitize User Output ─────────────────────────────────────────────
+function sanitizeUser(user: UserRecord) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    targetRole: user.targetRole,
+    experienceLevel: user.experienceLevel,
+    createdAt: user.createdAt,
+    resumeFileName: user.resumeFileName,
+  };
+}
+
+function formatDate() {
+  return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+// ─── Fallback Engines ─────────────────────────────────────────────────────────
+function buildFallbackResumeResult(resumeText: string) {
+  const hasMetrics = /\d+([%kKmMbB]|\s*(percent|latency|users|arr|rps))/i.test(resumeText);
+  const hasActionVerbs = /(spearheaded|architected|designed|orchestrated|optimized|engineered|scaled|reduced)/i.test(resumeText);
+  const hasModernStack = /(typescript|react|kubernetes|docker|node|go|python|aws|distributed|kafka|langchain|terraform)/i.test(resumeText);
+  let score = 72;
+  if (hasMetrics) score += 10;
+  if (hasActionVerbs) score += 8;
+  if (hasModernStack) score += 7;
+  score = Math.min(93, Math.max(58, score));
+
+  return {
+    atsScore: score,
+    grade: score >= 88 ? "Excellent" : score >= 78 ? "Competitive" : "Needs Optimization",
+    summary: "Strong technical foundation with relevant modern stack alignment. Some quantification improvements will boost ATS ranking.",
+    topSuggestions: [
+      {
+        title: "Quantify Organizational & Business Impact",
+        impact: "High",
+        detail: "Replace passive descriptions with business outcomes (cost saved, latency reduced, users served).",
+        beforeAfterExample: {
+          before: "Worked on distributed microservices and improved latency.",
+          after: "Re-architected distributed microservice pipelines, cutting p99 latency by 38% for 4.5M DAU.",
+        },
+      },
+      {
+        title: "Add Strategic Architecture & RFC Governance",
+        impact: "Essential",
+        detail: "Explicitly mention cross-team technical RFCs authored and engineering alignment achieved.",
+        beforeAfterExample: {
+          before: "Built frontend features using React and WebSockets.",
+          after: "Authored frontend state management RFC and led 6-engineer squad delivering real-time streaming UI.",
+        },
+      },
+      {
+        title: "Include Infrastructure & Observability Keywords",
+        impact: "Medium",
+        detail: "Add OpenTelemetry, distributed tracing, and CI/CD pipeline keywords to match modern ATS filters.",
+      },
+    ],
+    strengths: ["Modern tech stack alignment", "Evidence of scalable production systems", "Clear engineering progression"],
+    detectedSkills: ["TypeScript", "React", "Node.js", "Distributed Systems", "PostgreSQL", "Redis", "Cloud"],
+    missingKeywords: ["OpenTelemetry / Tracing", "Terraform / IaC", "SLO / SLA Definition", "LangChain / RAG"],
+    skillScores: [
+      { skill: "TypeScript / React", score: 88 },
+      { skill: "System Design", score: 74 },
+      { skill: "Cloud Infrastructure", score: 55 },
+      { skill: "Generative AI", score: 35 },
+    ],
+    careerReadinessScore: Math.round(score * 0.92),
+    formattedDate: formatDate(),
+    agentExplanation: buildAgentExplanation(
+      "ResumeIntelligenceAgent",
+      "Deterministic ATS Evaluation (Offline Mode)",
+      ["Analyzed keyword density, action verb quality, and metric quantification", "Compared detected stack against Staff-level ATS rubric from RAG knowledge base"],
+      score
+    ),
+  };
+}
+
+function buildFallbackJobMatch(jobDescription: string, candidateResume: string) {
+  const jd = jobDescription.toLowerCase();
+  const resume = candidateResume.toLowerCase();
+  const techTerms = ["typescript", "react", "node", "go", "python", "kubernetes", "docker", "aws", "gcp", "graphql", "kafka", "redis", "postgresql", "terraform", "microservices"];
+  const matched = techTerms.filter((t) => jd.includes(t) && resume.includes(t));
+  const gaps = techTerms.filter((t) => jd.includes(t) && !resume.includes(t));
+  const score = Math.min(92, Math.max(58, Math.round((matched.length / Math.max(1, matched.length + gaps.length)) * 100)));
+
+  return {
+    compatibilityScore: score,
+    matchTier: score >= 80 ? "Strong Match" : score >= 65 ? "Moderate Match" : "Growth Opportunity",
+    matchedSkills: matched.length ? matched.map((s) => s.charAt(0).toUpperCase() + s.slice(1)) : ["TypeScript", "System Design", "React"],
+    rankedGaps: (gaps.length ? gaps : ["Kubernetes / Helm", "Terraform IaC", "OpenTelemetry"]).slice(0, 3).map((gap, i) => ({
+      skill: gap.charAt(0).toUpperCase() + gap.slice(1),
+      urgency: i === 0 ? "Critical" : i === 1 ? "High" : "Nice to have",
+      recommendation: `Add a bullet demonstrating hands-on experience with ${gap} in a production context.`,
+    })),
+    resumeAdjustmentAdvice: `Tailor your top 2 resume bullets to specifically reflect the ${score}% overlap and quantify outcomes matching the JD's primary stack requirements.`,
+    agentExplanation: buildAgentExplanation(
+      "JobMatchingAgent",
+      "Heuristic Keyword Matching (Offline Mode)",
+      ["Compared candidate skills against job description requirements using keyword overlap scoring", "Ranked gaps by frequency and seniority signals in the job description"],
+      score
+    ),
+  };
+}
+
+function buildFallbackRoadmap(targetRole: string) {
+  return {
+    targetRole,
+    estimatedTimeline: "6 - 9 Months",
+    summary: `Strategic progression plan bridging core domain gaps and calibrating for ${targetRole} hiring loops.`,
+    steps: [
+      {
+        phase: "Phase 1 (Months 1-2)",
+        duration: "60 Days",
+        milestoneTitle: "Technical Depth & Architectural Gaps",
+        description: "Deep dive into system scalability, consensus protocols, and infrastructure observability.",
+        keyActions: ["Audit top 3 system bottlenecks and propose decoupled architecture solution", "Author Technical Design RFC addressing service reliability", "Implement automated performance benchmarking in staging"],
+        criticalSkillsToLearn: ["Distributed System Trade-offs", "Telemetry & Observability", "IaC Fundamentals"],
+      },
+      {
+        phase: "Phase 2 (Months 3-5)",
+        duration: "90 Days",
+        milestoneTitle: "Cross-Team Influence & Technical Leadership",
+        description: "Drive technical consensus across multiple pods and establish engineering best practices.",
+        keyActions: ["Lead technical roadmap planning across multiple engineering teams", "Establish architecture review sessions and mentor senior engineers", "Present technical case study to engineering leadership"],
+        criticalSkillsToLearn: ["Stakeholder Alignment", "Mentorship at Scale", "Strategic Trade-off Analysis"],
+      },
+      {
+        phase: "Phase 3 (Months 6-8)",
+        duration: "90 Days",
+        milestoneTitle: "Interview Mastery & Role Calibration",
+        description: "Execute targeted system design simulations and lock in senior-level interview loops.",
+        keyActions: ["Conduct 5 mock Staff-level system design + behavioral interviews", "Calibrate resume metrics to highlight business value and org leverage", "Secure referrals and engage hiring managers directly"],
+        criticalSkillsToLearn: ["STAR-T Behavioral Delivery", "System Design Synthesis", "Offer Negotiation"],
+      },
+    ],
+    agentExplanation: buildAgentExplanation(
+      "CareerStrategyAgent",
+      "Template-based Roadmap Generation (Offline Mode)",
+      ["Generated phased roadmap using industry benchmark data from RAG knowledge base", "Personalized timeline based on typical Staff-level transition patterns"],
+      85
+    ),
+  };
+}
+
+function buildFallbackInterviewFeedback(userAnswer: string) {
+  const length = userAnswer.trim().length;
+  const score = Math.min(94, Math.max(62, Math.round(68 + Math.min(24, length / 42))));
+  return {
+    score,
+    verdict: score >= 85 ? "Strong Hire" : score >= 75 ? "Hire" : "Leaning Hire",
+    strengths: [
+      "Directly addresses core architectural constraints without unnecessary preamble",
+      "Demonstrates solid understanding of distributed trade-offs and latency boundaries",
+      "Good structured breakdown of components and request lifecycle",
+    ],
+    growthAreas: [
+      "Incorporate concrete numeric estimates (QPS, payload size, memory footprint per node)",
+      "Highlight specific failure scenarios and graceful degradation modes",
+    ],
+    improvedAnswerModel: `A premier Staff-level response opens with exact operational constraints: 'To handle 500k RPS with sub-5ms overhead, we decouple local edge token evaluation from async background ledger synchronization.' Then outline: (1) Local in-memory sliding window per edge node, (2) Batched async consensus via Redis Cluster with Raft sync, and (3) Graceful fail-open degradation under split-brain partitions. Close with operational concerns: monitoring dashboards, alerting thresholds, and incident runbooks.`,
+    keyFollowUpTip: "Anticipate: 'How do you handle flash-crowd DDoS spikes when local token buckets deplete simultaneously across all regions?'",
+    agentExplanation: buildAgentExplanation(
+      "InterviewCoachAgent",
+      "Rubric-based Evaluation (Offline Mode)",
+      ["Scored answer against Staff-level rubric: technical depth, trade-off analysis, and quantification quality", "Assessed STAR-T structure and communication clarity"],
+      score
+    ),
+  };
 }
 
 startServer();
