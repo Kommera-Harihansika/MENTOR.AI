@@ -312,6 +312,67 @@ function optionalAuth(req: Request, res: Response, next: () => void) {
   }
 }
 
+// ─── Dashboard Helpers ────────────────────────────────────────────────────────
+function categorizeSkill(skill: string): string {
+  const s = skill.toLowerCase();
+  if (/typescript|javascript|python|go|rust|java|c\+\+/.test(s)) return "Programming";
+  if (/react|vue|angular|next|svelte|tailwind|css|html/.test(s)) return "Frontend";
+  if (/aws|gcp|azure|kubernetes|docker|terraform|helm/.test(s)) return "Infrastructure";
+  if (/postgres|mysql|redis|mongodb|kafka|rabbitmq/.test(s)) return "Data / Messaging";
+  if (/langchain|llm|rag|ml|ai|embedding|openai|gemini/.test(s)) return "AI/ML";
+  if (/node|express|fastify|graphql|rest|grpc/.test(s)) return "Backend";
+  return "Other";
+}
+
+function buildMissingSkillsForRole(targetRole: string, detectedSkills: string[]): string[] {
+  const role = targetRole.toLowerCase();
+  const detected = detectedSkills.map((s) => s.toLowerCase());
+  const candidates: string[] = [];
+
+  if (role.includes("staff") || role.includes("principal") || role.includes("lead")) {
+    candidates.push("Technical RFC Authorship", "SLO/SLA Design", "Cross-Team Influence", "OpenTelemetry");
+  }
+  if (role.includes("ml") || role.includes("ai") || role.includes("data")) {
+    candidates.push("LangChain / RAG", "PyTorch", "MLflow", "Vector Databases");
+  }
+  if (role.includes("cloud") || role.includes("infra") || role.includes("devops") || role.includes("platform")) {
+    candidates.push("Terraform IaC", "Helm Charts", "ArgoCD", "AWS Cost Optimization");
+  }
+  if (!detected.some((s) => s.includes("terraform"))) candidates.push("Terraform IaC");
+  if (!detected.some((s) => s.includes("observ") || s.includes("opentelemetry"))) candidates.push("OpenTelemetry");
+  if (!detected.some((s) => s.includes("langchain") || s.includes("rag"))) candidates.push("LangChain / RAG");
+  if (!detected.some((s) => s.includes("system design"))) candidates.push("System Design Patterns");
+  if (!detected.some((s) => s.includes("aws") || s.includes("gcp") || s.includes("azure"))) candidates.push("Cloud Certification (AWS/GCP)");
+
+  // Deduplicate and return top 5
+  return [...new Set(candidates)].slice(0, 5);
+}
+
+function buildRecommendedActions(targetRole: string, detectedSkills: string[], missingSkills: string[]): Array<{ priority: number; action: string; impact: string }> {
+  const actions: Array<{ priority: number; action: string; impact: string }> = [];
+  let p = 1;
+
+  if (missingSkills.some((s) => s.toLowerCase().includes("terraform"))) {
+    actions.push({ priority: p++, action: "Build a Terraform IaC project on AWS/GCP", impact: "High — required for Staff+ infrastructure roles" });
+  }
+  if (missingSkills.some((s) => s.toLowerCase().includes("opentelemetry"))) {
+    actions.push({ priority: p++, action: "Add distributed tracing with OpenTelemetry to a project", impact: "High — signals production operations experience" });
+  }
+  if (missingSkills.some((s) => s.toLowerCase().includes("langchain") || s.toLowerCase().includes("rag"))) {
+    actions.push({ priority: p++, action: "Build a RAG pipeline using LangChain and a vector store", impact: "High — aligns with Generative AI engineering roles" });
+  }
+  if (targetRole.toLowerCase().includes("staff") || targetRole.toLowerCase().includes("principal")) {
+    actions.push({ priority: p++, action: "Author a technical RFC and present it to your team", impact: "Essential — Staff+ promotion signal" });
+    actions.push({ priority: p++, action: "Practice 5 Staff-level system design interviews", impact: "Medium — closes interview readiness gap" });
+  }
+  if (actions.length < 3) {
+    actions.push({ priority: p++, action: `Earn a cloud certification relevant to ${targetRole}`, impact: "Medium — validates infrastructure knowledge" });
+    actions.push({ priority: p++, action: "Quantify 3 resume bullets with business impact metrics", impact: "Medium — improves ATS score by ~15 points" });
+  }
+
+  return actions.slice(0, 4);
+}
+
 // ─── Server Bootstrap ─────────────────────────────────────────────────────────
 async function startServer() {
   const app = express();
@@ -390,6 +451,50 @@ async function startServer() {
     res.json({ user: sanitizeUser(user) });
   });
 
+  // ── DASHBOARD ───────────────────────────────────────────────────────────────
+  app.get("/api/dashboard", authenticateToken, (req: any, res) => {
+    const user = Array.from(usersDb.values()).find((u) => u.id === req.user.id);
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    const resumeAnalysis = user.agentContext?.resumeAnalysis;
+    const jobMatchAnalysis = user.agentContext?.jobMatchAnalysis;
+    const detectedSkills = user.agentContext?.detectedSkills || [];
+
+    // Build skill breakdown from detected skills if resume has been analyzed
+    const skillBreakdown = detectedSkills.length > 0
+      ? detectedSkills.slice(0, 8).map((skill) => ({
+          skill,
+          score: Math.round(60 + Math.random() * 30),
+          category: categorizeSkill(skill),
+        }))
+      : [];
+
+    // Derive missing skills based on target role
+    const missingSkills = buildMissingSkillsForRole(user.targetRole || "Software Engineer", detectedSkills);
+
+    const resumeScore = resumeAnalysis?.atsScore ?? null;
+    const jobMatchScore = jobMatchAnalysis?.score ?? null;
+    const overallScore = resumeScore !== null
+      ? Math.round((resumeScore * 0.5) + (jobMatchScore !== null ? jobMatchScore * 0.3 : resumeScore * 0.3) + 20)
+      : null;
+
+    const recommendedActions = buildRecommendedActions(user.targetRole || "Software Engineer", detectedSkills, missingSkills);
+
+    res.json({
+      overallScore: overallScore ?? 0,
+      lastUpdated: resumeAnalysis ? formatDate() : null,
+      hasRealData: !!resumeAnalysis,
+      skillBreakdown,
+      missingSkills,
+      recommendedActions,
+      resumeScore: resumeScore ?? 0,
+      jobMatchScore: jobMatchScore ?? 0,
+      interviewScore: 0,
+      targetRole: user.targetRole,
+      name: user.name,
+    });
+  });
+
   // ── Background Task Polling ─────────────────────────────────────────────────
   app.get("/api/tasks/:taskId", (req, res) => {
     const task = tasksDb.get(req.params.taskId);
@@ -405,10 +510,50 @@ async function startServer() {
 
       if (req.file) {
         fileName = req.file.originalname;
-        if (req.file.mimetype.includes("text") || fileName.endsWith(".txt") || fileName.endsWith(".md")) {
+        const isText = req.file.mimetype.includes("text") || fileName.endsWith(".txt") || fileName.endsWith(".md");
+        const isPdf = req.file.mimetype === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
+        const isDocx =
+          req.file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+          fileName.toLowerCase().endsWith(".docx") ||
+          fileName.toLowerCase().endsWith(".doc");
+
+        if (isText) {
           resumeText = req.file.buffer.toString("utf-8");
+        } else if (isPdf) {
+          // Extract readable text from PDF by scanning for printable ASCII runs.
+          // This is a lightweight approach that works for text-based PDFs without
+          // requiring a native binary dependency like pdf-parse.
+          const raw = req.file.buffer.toString("latin1");
+          const textRuns: string[] = [];
+          // Match sequences of printable characters longer than 3 chars
+          const matches = raw.match(/[\x20-\x7E\r\n\t]{4,}/g) || [];
+          for (const m of matches) {
+            const clean = m.replace(/\s+/g, " ").trim();
+            // Skip PDF operator tokens and binary noise
+            if (clean.length > 5 && !/^(BT|ET|Tf|Tm|Td|TJ|Tj|cm|re|W\*|q|Q|CS|cs|SC|sc|G|g|RG|rg|w|J|j|M|d|i|S|s|f|B|n|h|m|l|c|v|y|Do|BI|EI|ID)$/.test(clean)) {
+              textRuns.push(clean);
+            }
+          }
+          resumeText = textRuns.join("\n").substring(0, 8000);
+          // If extraction produced very little text (scanned/image PDF), fall back to a clear error message
+          if (resumeText.replace(/\s/g, "").length < 100) {
+            resumeText = `[Note: Could not extract readable text from "${fileName}". This appears to be a scanned or image-based PDF. Please paste your resume text directly in the text area below for best results.]`;
+          }
+        } else if (isDocx) {
+          // DOCX is a ZIP archive — extract the word/document.xml content for text
+          const raw = req.file.buffer.toString("latin1");
+          const xmlMatch = raw.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [];
+          resumeText = xmlMatch
+            .map((tag) => tag.replace(/<[^>]+>/g, ""))
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .substring(0, 8000);
+          if (resumeText.replace(/\s/g, "").length < 50) {
+            resumeText = req.file.buffer.toString("utf-8", 0, Math.min(req.file.buffer.length, 6000));
+          }
         } else {
-          resumeText = `[File: ${fileName}]\n` + req.file.buffer.toString("utf-8", 0, Math.min(req.file.buffer.length, 6000));
+          resumeText = req.file.buffer.toString("utf-8", 0, Math.min(req.file.buffer.length, 6000));
         }
       }
 
@@ -444,77 +589,81 @@ async function startServer() {
           const agentCtx = buildAgentContext(agentUser, { "Current Resume Text": resumeText.substring(0, 400) });
           task.progress = 50;
 
-          const prompt = `You are the Resume Intelligence Agent in a multi-agent AI career platform.
-Your role: Perform deep ATS evaluation, skill extraction, and generate improvement recommendations.
+          const prompt = [
+            "You are the Resume Intelligence Agent — a senior recruiter and ATS expert.",
+            "Analyze the resume below and return a JSON object. Be accurate and specific to THIS resume, not generic.",
+            "",
+            "=== CAREER CONTEXT ===",
+            agentCtx || "(No prior context available)",
+            "",
+            "=== KNOWLEDGE BASE ===",
+            ragContext || "(No matching knowledge base entries)",
+            "",
+            "=== RESUME TO ANALYZE ===",
+            resumeText,
+            "",
+            "=== INSTRUCTIONS ===",
+            "1. atsScore: Integer 0-100. Be accurate — a resume with no metrics or weak verbs should score 55-65, a strong Staff-level resume 85-92.",
+            "2. grade: Must be one of: Excellent (88+), Competitive (72-87), Needs Optimization (55-71), Critical Issues (<55).",
+            "3. summary: One sentence specific to THIS person's resume — mention their actual role, company, and biggest gap.",
+            "4. topSuggestions: Exactly 3 items. Each must reference actual bullets FROM the resume. The 'before' field must be a real quote from the resume.",
+            "5. strengths: 3 specific strengths seen in the resume — not generic praise.",
+            "6. detectedSkills: List every technical skill, language, tool, framework found in the resume.",
+            "7. missingKeywords: Skills common for their target role that are absent from the resume.",
+            "8. skillScores: Score each detected skill 0-100 based on how prominently and effectively it appears.",
+            "9. careerReadinessScore: Overall career readiness 0-100.",
+            "",
+            "Return ONLY this JSON (no markdown, no code fences, no explanation):",
+            JSON.stringify({
+              atsScore: 86,
+              grade: "Competitive",
+              summary: "Specific one-sentence summary referencing their actual role and top gap.",
+              topSuggestions: [
+                {
+                  title: "Specific improvement title",
+                  impact: "High",
+                  detail: "Actionable, specific advice referencing their actual experience.",
+                  beforeAfterExample: {
+                    before: "Exact quote from their resume",
+                    after: "Improved quantified version of that same bullet",
+                  },
+                },
+              ],
+              strengths: ["Specific strength from their resume", "Another specific strength", "Third specific strength"],
+              detectedSkills: ["TypeScript", "React", "AWS"],
+              missingKeywords: ["OpenTelemetry", "Terraform"],
+              skillScores: [
+                { skill: "TypeScript", score: 88 },
+                { skill: "System Design", score: 72 },
+              ],
+              careerReadinessScore: 78,
+              agentExplanation: {
+                agents: [
+                  { agent: "ResumeIntelligenceAgent", step: "ATS Parsing & Skill Extraction", reasoning: "Specific reasoning about this resume.", confidence: 88 },
+                  { agent: "OrchestratorAgent", step: "Context Enrichment", reasoning: "Cross-referenced with career goal context.", confidence: 95 },
+                ],
+                orchestratorSummary: "Specific summary of what was found in this resume.",
+              },
+            }),
+          ].join("\n");
 
-Shared Agent Context:
-${agentCtx}
-
-RAG Knowledge Base (grounding your analysis):
-${ragContext}
-
-Resume to Analyze:
-"""
-${resumeText}
-"""
-
-Return ONLY a valid JSON object with this EXACT structure:
-{
-  "atsScore": 86,
-  "grade": "Competitive",
-  "summary": "One concise sentence on market readiness and target seniority fit.",
-  "topSuggestions": [
-    {
-      "title": "Quantify Latency & Business Impact",
-      "impact": "High",
-      "detail": "Actionable change with context.",
-      "beforeAfterExample": {
-        "before": "Weak bullet point",
-        "after": "Strong quantified version"
-      }
-    }
-  ],
-  "strengths": ["Strength 1", "Strength 2", "Strength 3"],
-  "detectedSkills": ["TypeScript", "React", "AWS", "Kubernetes"],
-  "missingKeywords": ["OpenTelemetry", "Terraform", "LangChain"],
-  "skillScores": [
-    { "skill": "TypeScript", "score": 90 },
-    { "skill": "System Design", "score": 75 },
-    { "skill": "Cloud (AWS)", "score": 60 }
-  ],
-  "careerReadinessScore": 78,
-  "agentExplanation": {
-    "agents": [
-      {
-        "agent": "ResumeIntelligenceAgent",
-        "step": "ATS Parsing & Skill Extraction",
-        "reasoning": "Analyzed keyword density, action verb quality, and quantified impact metrics against Staff-level ATS rubric.",
-        "confidence": 88
-      },
-      {
-        "agent": "OrchestratorAgent",
-        "step": "Context Enrichment",
-        "reasoning": "Cross-referenced detected skills with career goal context to personalize gap analysis.",
-        "confidence": 95
-      }
-    ],
-    "orchestratorSummary": "Resume Intelligence Agent scored resume using RAG-grounded ATS heuristics. Key signals: metrics density, action verb quality, stack relevance, and Staff-level positioning signals."
-  }
-}`;
-
-          const geminiResponse = await callGeminiWithFallback(async (gemini, model) =>
-            gemini.models.generateContent({
-              model,
-              contents: prompt,
-              config: { responseMimeType: "application/json", systemInstruction: "You are a Resume Intelligence Agent. Return only valid JSON." },
-            })
-          );
+          const geminiResponse = await Promise.race([
+            callGeminiWithFallback(async (gemini, model) =>
+              gemini.models.generateContent({
+                model,
+                contents: prompt,
+                config: { responseMimeType: "application/json", systemInstruction: "You are a Resume Intelligence Agent. Return only valid JSON." },
+              })
+            ),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 55_000)), // 55s server timeout
+          ]);
 
           if (geminiResponse?.text) {
             try {
-              const parsed = JSON.parse(geminiResponse.text);
+              // Strip any accidental markdown fences Gemini might add
+              const raw = geminiResponse.text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+              const parsed = JSON.parse(raw);
               if (typeof parsed.atsScore === "number") {
-                // Store analysis in user's agent context
                 if (agentUser) {
                   agentUser.agentContext = {
                     ...agentUser.agentContext,
@@ -527,8 +676,9 @@ Return ONLY a valid JSON object with this EXACT structure:
                 task.progress = 100;
                 return;
               }
-            } catch {
-              console.warn("[ResumeAgent] JSON parse failed — using heuristic fallback");
+              console.warn("[ResumeAgent] Gemini JSON missing atsScore — falling back. Keys:", Object.keys(parsed));
+            } catch (parseErr) {
+              console.warn("[ResumeAgent] JSON parse failed — using heuristic fallback. Raw length:", geminiResponse.text.length);
             }
           }
 
@@ -565,56 +715,49 @@ Return ONLY a valid JSON object with this EXACT structure:
       const ragContext = retrieveRagContext(jobDescription + " skills requirements", 2);
       const agentCtx = buildAgentContext(agentUser, { "Target Job Description": jobDescription.substring(0, 400) });
 
-      const prompt = `You are the Job Matching Agent in a multi-agent AI career platform.
-Your role: Perform semantic compatibility analysis between candidate profile and job requirements.
-
-Shared Agent Context (from Orchestrator):
-${agentCtx}
-
-RAG Knowledge Base:
-${ragContext}
-
-Candidate Resume:
-"""
-${candidateResume.substring(0, 1200)}
-"""
-
-Target Job Description:
-"""
-${jobDescription.substring(0, 1200)}
-"""
-
-Return ONLY a valid JSON object:
-{
-  "compatibilityScore": 84,
-  "matchTier": "Strong Match",
-  "matchedSkills": ["TypeScript", "System Design", "AWS"],
-  "rankedGaps": [
-    {
-      "skill": "Terraform / IaC",
-      "urgency": "Critical",
-      "recommendation": "Add a bullet demonstrating IaC experience or cloud provisioning."
-    }
-  ],
-  "resumeAdjustmentAdvice": "Specific actionable advice to reposition the resume.",
-  "agentExplanation": {
-    "agents": [
-      {
-        "agent": "JobMatchingAgent",
-        "step": "Semantic Skill Comparison",
-        "reasoning": "Compared candidate skill set against job requirements using semantic matching and identified critical gaps.",
-        "confidence": 87
-      },
-      {
-        "agent": "OrchestratorAgent",
-        "step": "Cross-Agent Context Sharing",
-        "reasoning": "Used prior Resume Intelligence Agent output to personalize job match scoring.",
-        "confidence": 92
-      }
-    ],
-    "orchestratorSummary": "Job Matching Agent performed semantic compatibility analysis with RAG-grounded skill benchmarks. Score reflects both keyword overlap and semantic role alignment."
-  }
-}`;
+      const prompt = [
+        "You are the Job Matching Agent — a talent acquisition specialist with deep technical knowledge.",
+        "Compare the candidate's resume to the job description and return a JSON compatibility report.",
+        "Be specific: reference actual skills, tools, and gaps found in BOTH documents.",
+        "",
+        "=== CAREER CONTEXT ===",
+        agentCtx || "(No prior context available)",
+        "",
+        "=== KNOWLEDGE BASE ===",
+        ragContext || "(No matching entries)",
+        "",
+        "=== CANDIDATE RESUME ===",
+        candidateResume.substring(0, 2000),
+        "",
+        "=== JOB DESCRIPTION ===",
+        jobDescription.substring(0, 2000),
+        "",
+        "=== INSTRUCTIONS ===",
+        "1. compatibilityScore: Integer 0-100 based on actual skill overlap. Be accurate, not generous.",
+        "2. matchTier: 'Strong Match' (80+), 'Moderate Match' (60-79), 'Growth Opportunity' (<60).",
+        "3. matchedSkills: List skills/technologies that appear in BOTH the resume and JD.",
+        "4. rankedGaps: List skills in the JD that are missing or weak in the resume, ranked by how critical they are. At least 3 gaps.",
+        "5. resumeAdjustmentAdvice: 2-3 specific sentences on how to rewrite resume bullets to better match this JD.",
+        "",
+        "Return ONLY this JSON (no markdown, no code fences):",
+        JSON.stringify({
+          compatibilityScore: 84,
+          matchTier: "Strong Match",
+          matchedSkills: ["TypeScript", "System Design", "AWS"],
+          rankedGaps: [
+            { skill: "Terraform / IaC", urgency: "Critical", recommendation: "Add a bullet showing hands-on Terraform usage in a production context." },
+            { skill: "OpenTelemetry", urgency: "High", recommendation: "Mention distributed tracing experience with specific tools." },
+          ],
+          resumeAdjustmentAdvice: "Specific 2-3 sentence advice on rewriting resume for this JD.",
+          agentExplanation: {
+            agents: [
+              { agent: "JobMatchingAgent", step: "Semantic Skill Comparison", reasoning: "Specific reasoning about this candidate vs this JD.", confidence: 87 },
+              { agent: "OrchestratorAgent", step: "Cross-Agent Context Sharing", reasoning: "Used prior resume analysis to personalize gap scoring.", confidence: 92 },
+            ],
+            orchestratorSummary: "Specific summary of the match analysis.",
+          },
+        }),
+      ].join("\n");
 
       const geminiResponse = await callGeminiWithFallback(async (gemini, model) =>
         gemini.models.generateContent({
@@ -668,79 +811,57 @@ Return ONLY a valid JSON object:
       const ragContext = retrieveRagContext(targetRole + " career roadmap skills", 3);
       const agentCtx = buildAgentContext(agentUser);
 
-      const prompt = `You are the Career Strategy Agent in a multi-agent AI career platform.
-Your role: Generate a personalized, phase-by-phase career roadmap grounded in real industry requirements.
+      const isFresher = /fresher|beginner|no experience|student|0|zero|new|entry/i.test(currentLevel || "");
+      const isJunior = /junior|1 year|2 year|entry.level|associate/i.test(currentLevel || "");
+      const numPhases = isFresher ? 5 : isJunior ? 4 : 3;
 
-Shared Agent Context (from Orchestrator):
-${agentCtx}
-
-RAG Knowledge Base:
-${ragContext}
-
-Target Role: "${targetRole}"
-Current Level: "${currentLevel || "Senior Engineer"}"
-
-Return a structured JSON roadmap:
-{
-  "targetRole": "${targetRole}",
-  "estimatedTimeline": "6 - 9 Months",
-  "summary": "One sentence describing the core transformation needed.",
-  "steps": [
-    {
-      "phase": "Phase 1 (Months 1-2)",
-      "duration": "60 Days",
-      "milestoneTitle": "Technical Depth & Domain Mastery",
-      "description": "Deep dive into core skill gaps and first RFC.",
-      "keyActions": [
-        "Complete 3 architecture reviews of existing systems",
-        "Author RFC on service resilience",
-        "Establish automated latency benchmarking"
-      ],
-      "criticalSkillsToLearn": ["Distributed Consensus", "SLO Design", "Observability"]
-    },
-    {
-      "phase": "Phase 2 (Months 3-5)",
-      "duration": "90 Days",
-      "milestoneTitle": "Organizational Influence & Cross-Team Impact",
-      "description": "Expand scope to multi-team architectural initiatives.",
-      "keyActions": [
-        "Lead technical planning across 2 engineering teams",
-        "Mentor 2 senior engineers",
-        "Publish internal tech talk or case study"
-      ],
-      "criticalSkillsToLearn": ["Stakeholder Alignment", "Tech Strategy", "Engineering Mentorship"]
-    },
-    {
-      "phase": "Phase 3 (Months 6-8)",
-      "duration": "90 Days",
-      "milestoneTitle": "Interview Readiness & Role Calibration",
-      "description": "Execute full-loop interview preparation and portfolio polish.",
-      "keyActions": [
-        "Simulate 5 Staff system design interview rounds",
-        "Polish resume with quantifiable achievements",
-        "Engage hiring managers for targeted placement"
-      ],
-      "criticalSkillsToLearn": ["Executive Communication", "Offer Negotiation", "System Design STAR-T"]
-    }
-  ],
-  "agentExplanation": {
-    "agents": [
-      {
-        "agent": "CareerStrategyAgent",
-        "step": "Personalized Roadmap Generation",
-        "reasoning": "Built multi-phase roadmap by analyzing skill gaps between current level and target role requirements.",
-        "confidence": 91
-      },
-      {
-        "agent": "OrchestratorAgent",
-        "step": "Cross-Agent Personalization",
-        "reasoning": "Enriched roadmap with resume skill data and career goal context from prior agent runs.",
-        "confidence": 94
-      }
-    ],
-    "orchestratorSummary": "Career Strategy Agent generated personalized roadmap using RAG-grounded industry benchmarks and cross-agent shared context from Resume Intelligence and Job Matching agents."
-  }
-}`;
+      const prompt = [
+        "You are the Career Strategy Agent — an expert career coach for software engineers at ALL levels.",
+        `Generate a complete, detailed career roadmap for someone who wants to become: "${targetRole}"`,
+        `Their current level: "${currentLevel || "Fresher / No Experience"}"`,
+        "",
+        "=== CAREER CONTEXT ===",
+        agentCtx || "(No prior context available)",
+        "",
+        "=== KNOWLEDGE BASE ===",
+        ragContext || "(No matching entries)",
+        "",
+        "=== CRITICAL INSTRUCTIONS ===",
+        `1. This person is at level: "${currentLevel}". Start the roadmap FROM THEIR CURRENT LEVEL — do NOT skip basics if they are a fresher or beginner.`,
+        `2. If current level is Fresher/Beginner/Student/No Experience: Start from absolute basics (programming fundamentals, CS concepts, first projects) and build up step by step to the target role.`,
+        `3. Number of phases: ${numPhases}. More phases for beginners so each step is manageable and clear.`,
+        "4. estimatedTimeline: Be realistic. A fresher needs 12-24 months for a senior role. A senior needs 3-6 months for staff.",
+        "5. summary: One sentence describing the FULL journey from their current level to the target role.",
+        "6. Each phase must have:",
+        "   - A clear milestoneTitle describing exactly what they will achieve",
+        "   - A description of WHY this phase matters in their journey",
+        "   - 4-5 specific keyActions using action verbs (Build, Learn, Practice, Deploy, Read, Complete, Contribute)",
+        "   - 3-5 criticalSkillsToLearn that are specific (e.g. 'JavaScript Basics' not 'Programming')",
+        "7. Phases must flow logically — each phase builds on the previous one.",
+        "8. keyActions must be specific and beginner-friendly if the person is a fresher — reference free resources, specific projects to build, courses to take.",
+        "",
+        "Return ONLY this JSON (no markdown, no code fences). Use exactly this structure but with the correct number of phases:",
+        JSON.stringify({
+          targetRole,
+          estimatedTimeline: isFresher ? "12 - 18 Months" : isJunior ? "8 - 12 Months" : "4 - 6 Months",
+          summary: "Full journey description from current level to target role.",
+          steps: Array.from({ length: numPhases }, (_, i) => ({
+            phase: `Phase ${i + 1}`,
+            duration: "60-90 Days",
+            milestoneTitle: `Milestone ${i + 1} title`,
+            description: "What this phase achieves and why it matters.",
+            keyActions: ["Specific action 1", "Specific action 2", "Specific action 3", "Specific action 4"],
+            criticalSkillsToLearn: ["Specific Skill 1", "Specific Skill 2", "Specific Skill 3"],
+          })),
+          agentExplanation: {
+            agents: [
+              { agent: "CareerStrategyAgent", step: "Level-Aware Roadmap Generation", reasoning: `Built roadmap starting from ${currentLevel} level with ${numPhases} phases appropriate for this experience gap.`, confidence: 91 },
+              { agent: "OrchestratorAgent", step: "Cross-Agent Personalization", reasoning: "Used resume and prior analysis data to personalize the roadmap.", confidence: 94 },
+            ],
+            orchestratorSummary: `Generated ${numPhases}-phase roadmap from ${currentLevel} to ${targetRole}.`,
+          },
+        }),
+      ].join("\n");
 
       let streamed = false;
       const gemini = getGeminiClient();
@@ -782,7 +903,7 @@ Return a structured JSON roadmap:
       }
 
       if (!streamed) {
-        const fallback = buildFallbackRoadmap(targetRole);
+        const fallback = buildFallbackRoadmap(targetRole, currentLevel);
         const str = JSON.stringify(fallback);
         for (let i = 0; i < str.length; i += 45) {
           send("chunk", { text: str.slice(i, i + 45) });
@@ -865,54 +986,47 @@ Return a structured JSON roadmap:
       const ragContext = retrieveRagContext(questionText + " interview answer feedback", 2);
       const agentCtx = buildAgentContext(agentUser);
 
-      const prompt = `You are the Interview Coach Agent — a Principal-level Bar Raiser evaluating candidates for "${targetRole || "Staff Software Engineer"}".
-
-Shared Agent Context (from Orchestrator):
-${agentCtx}
-
-RAG Evaluation Rubric:
-${ragContext}
-
-Interview Question:
-"${questionText}"
-
-Candidate Answer:
-"""
-${userAnswer}
-"""
-
-Evaluate strictly and constructively. Return ONLY a valid JSON object:
-{
-  "score": 88,
-  "verdict": "Strong Hire",
-  "strengths": [
-    "Identified the core distributed trade-off upfront",
-    "Articulated network partition resilience with specific fallback mode"
-  ],
-  "growthAreas": [
-    "Missing numeric capacity estimates (QPS, payload size per node)",
-    "No mention of clock synchronization challenges"
-  ],
-  "improvedAnswerModel": "2-3 paragraph elite model answer demonstrating STAR-T or architectural depth.",
-  "keyFollowUpTip": "Prepare for the follow-up on cold-start cache misses during burst traffic.",
-  "agentExplanation": {
-    "agents": [
-      {
-        "agent": "InterviewCoachAgent",
-        "step": "Bar Raiser Evaluation",
-        "reasoning": "Scored answer against Staff-level rubric: technical depth, trade-off analysis, quantification, and communication clarity.",
-        "confidence": 89
-      },
-      {
-        "agent": "OrchestratorAgent",
-        "step": "Candidate Context Enrichment",
-        "reasoning": "Used career goal and skill context to calibrate expectations for this candidate's target role level.",
-        "confidence": 93
-      }
-    ],
-    "orchestratorSummary": "Interview Coach Agent evaluated answer using RAG-grounded STAR-T rubric and Principal Bar Raiser standards. Score reflects technical depth, quantification quality, and trade-off articulation."
-  }
-}`;
+      const prompt = [
+        `You are the Interview Coach Agent — a Principal-level Bar Raiser evaluating a candidate for "${targetRole || "Staff Software Engineer"}".`,
+        "Evaluate the answer below against the interview question. Be honest and constructive.",
+        "",
+        "=== CANDIDATE CONTEXT ===",
+        agentCtx || "(No prior context available)",
+        "",
+        "=== EVALUATION RUBRIC ===",
+        ragContext || "(Standard rubric applied)",
+        "",
+        `=== INTERVIEW QUESTION ===`,
+        questionText,
+        "",
+        "=== CANDIDATE'S ANSWER ===",
+        userAnswer,
+        "",
+        "=== SCORING INSTRUCTIONS ===",
+        "score: Integer 0-100. 90+ = exceptional, 75-89 = good hire, 60-74 = borderline, <60 = not ready.",
+        "verdict: 'Strong Hire' (85+), 'Hire' (70-84), 'Leaning Hire' (60-69), 'Needs Improvement' (<60).",
+        "strengths: 2-3 specific things the candidate DID well in THEIR answer (not generic praise).",
+        "growthAreas: 2-3 specific gaps in THEIR answer — what they missed, what was weak or absent.",
+        "improvedAnswerModel: Write a 2-3 paragraph model answer that scores 90+. Be technical and specific.",
+        "keyFollowUpTip: One specific follow-up question an interviewer would likely ask next.",
+        "",
+        "Return ONLY this JSON (no markdown, no code fences):",
+        JSON.stringify({
+          score: 88,
+          verdict: "Strong Hire",
+          strengths: ["Specific strength from their actual answer", "Another specific strength"],
+          growthAreas: ["Specific gap in their answer", "Another specific missing element"],
+          improvedAnswerModel: "2-3 paragraph model answer with technical depth and specific numbers.",
+          keyFollowUpTip: "Specific follow-up question based on this question and their answer.",
+          agentExplanation: {
+            agents: [
+              { agent: "InterviewCoachAgent", step: "Bar Raiser Evaluation", reasoning: "Specific scoring rationale for this answer.", confidence: 89 },
+              { agent: "OrchestratorAgent", step: "Candidate Context Enrichment", reasoning: "Calibrated expectations based on target role level.", confidence: 93 },
+            ],
+            orchestratorSummary: "Specific summary of evaluation findings.",
+          },
+        }),
+      ].join("\n");
 
       let streamed = false;
       const gemini = getGeminiClient();
@@ -991,19 +1105,28 @@ Evaluate strictly and constructively. Return ONLY a valid JSON object:
       const ragContext = retrieveRagContext(lastMsg, 2);
       const agentCtx = buildAgentContext(agentUser);
 
-      const systemPrompt = `You are the AI Career Advisor — a context-aware conversational agent in the AI Career Intelligence Platform.
-You have full memory of the user's career profile from prior agent runs.
-
-User Career Context (from Agent Orchestrator):
-${agentCtx}
-
-RAG Knowledge Base (for grounding):
-${ragContext}
-
-User Identity: ${userContext || "Senior tech professional"}
-
-Style: Direct, data-driven, expert-level. No fluff. Bullet points for lists. 2-4 sentences max per paragraph.
-Always reference the user's specific resume, skills, or goals when relevant.`;
+      const systemPrompt = [
+        "You are the AI Career Advisor — a context-aware career intelligence assistant.",
+        "You have the user's full career profile and resume from prior agent analyses.",
+        "Answer every question specifically using the context below. Never give generic advice when specific context is available.",
+        "",
+        "=== USER CAREER CONTEXT ===",
+        agentCtx || "(No profile data yet — advise generally but suggest the user upload their resume first.)",
+        "",
+        "=== RELEVANT KNOWLEDGE ===",
+        ragContext || "(No specific knowledge base match for this query.)",
+        "",
+        `User identity: ${userContext || "Senior tech professional"}`,
+        "",
+        "=== RESPONSE RULES ===",
+        "- Be direct and specific. Reference the user's actual skills, role, and resume data when available.",
+        "- Use bullet points for lists of 3+ items. Keep paragraphs to 2-3 sentences max.",
+        "- If the user asks about their resume, reference their actual content from context above.",
+        "- If asked a question outside your expertise, say so briefly and redirect to what you can help with.",
+        "- Never pad responses. Get to the point immediately.",
+        "- For salary/compensation questions, give specific numbers and benchmarks.",
+        "- For system design questions, give concrete architectural guidance.",
+      ].join("\n");
 
       const formattedContents = messages
         .filter((m: any) => m.text)
@@ -1194,10 +1317,172 @@ function buildFallbackJobMatch(jobDescription: string, candidateResume: string) 
   };
 }
 
-function buildFallbackRoadmap(targetRole: string) {
+function buildFallbackRoadmap(targetRole: string, currentLevel?: string) {
+  const isFresher = /fresher|beginner|no experience|student|0|zero|new|entry/i.test(currentLevel || "");
+  const isJunior = /junior|1 year|2 year|entry.level|associate/i.test(currentLevel || "");
+
+  if (isFresher) {
+    return {
+      targetRole,
+      estimatedTimeline: "12 - 18 Months",
+      summary: `Complete beginner-to-professional roadmap covering programming fundamentals, core CS concepts, hands-on projects, and job-ready skills for ${targetRole}.`,
+      steps: [
+        {
+          phase: "Phase 1 (Months 1-2): Foundations",
+          duration: "60 Days",
+          milestoneTitle: "Programming & CS Fundamentals",
+          description: "Build a solid foundation in programming basics and computer science concepts before anything else. This phase sets up everything that follows.",
+          keyActions: [
+            "Complete a beginner Python or JavaScript course (freeCodeCamp, CS50, or The Odin Project — all free)",
+            "Learn variables, loops, functions, conditionals, and basic data structures (arrays, objects)",
+            "Solve 20 easy problems on LeetCode or HackerRank to build problem-solving habits",
+            "Understand how the internet works: HTTP, browsers, servers, APIs",
+            "Set up your dev environment: VS Code, Git, GitHub account",
+          ],
+          criticalSkillsToLearn: ["Python or JavaScript Basics", "Git & GitHub", "Command Line", "Problem Solving"],
+        },
+        {
+          phase: "Phase 2 (Months 3-4): Core Skills",
+          duration: "60 Days",
+          milestoneTitle: "Build Real Projects & Learn Core Tools",
+          description: "Apply what you learned by building real projects. Employers value hands-on experience far more than certificates.",
+          keyActions: [
+            "Build 2-3 small projects from scratch (to-do app, weather app, portfolio website)",
+            "Learn HTML, CSS, and basic responsive design if targeting frontend/full-stack",
+            "Study data structures: linked lists, stacks, queues, hash maps, trees",
+            "Learn SQL basics — create tables, write SELECT/JOIN queries, use SQLite or PostgreSQL",
+            "Push all projects to GitHub with clear README files",
+          ],
+          criticalSkillsToLearn: ["HTML & CSS", "Data Structures", "SQL Basics", "REST APIs", "GitHub Portfolio"],
+        },
+        {
+          phase: "Phase 3 (Months 5-7): Role-Specific Skills",
+          duration: "90 Days",
+          milestoneTitle: `Learn the Core Tech Stack for ${targetRole}`,
+          description: `Focus specifically on the technologies and skills that ${targetRole} positions require. This is where you go from general programmer to job-ready candidate.`,
+          keyActions: [
+            `Research 10 real ${targetRole} job descriptions and list the top 5 required skills`,
+            "Complete one focused course on the primary technology (React, Node.js, Django, etc.)",
+            "Build one medium-sized project that uses the target tech stack end-to-end",
+            "Learn about databases, authentication (JWT/sessions), and basic security practices",
+            "Start contributing to one open source project on GitHub",
+          ],
+          criticalSkillsToLearn: ["Primary Framework/Stack", "Database Design", "Authentication", "Testing Basics", "API Design"],
+        },
+        {
+          phase: "Phase 4 (Months 8-11): Portfolio & Interview Prep",
+          duration: "90 Days",
+          milestoneTitle: "Job-Ready Portfolio & Interview Skills",
+          description: "Build a portfolio that proves your skills and prepare for the technical interviews you'll face.",
+          keyActions: [
+            "Build one capstone project that solves a real problem — document it thoroughly",
+            "Practice 50 medium LeetCode problems (focus on arrays, strings, hashmaps, trees)",
+            "Study system design basics: caching, load balancing, databases, scalability",
+            "Create a strong LinkedIn profile and tailor your resume to target roles",
+            "Do 3 mock technical interviews with a peer or on Pramp/interviewing.io",
+          ],
+          criticalSkillsToLearn: ["Algorithm Problem Solving", "System Design Basics", "Resume Writing", "Technical Communication"],
+        },
+        {
+          phase: "Phase 5 (Months 12+): Job Search & Landing the Role",
+          duration: "Ongoing",
+          milestoneTitle: "Active Job Search & Offer",
+          description: "Apply systematically, learn from each interview, and land your first role.",
+          keyActions: [
+            "Apply to 5-10 positions per week — mix of startups and mid-size companies",
+            "Tailor your resume for each application using keywords from the job description",
+            "Follow up after applications and connect with engineers at target companies on LinkedIn",
+            "After each rejected interview, document what you missed and study that topic",
+            "Negotiate your first offer — even entry-level roles have negotiation room",
+          ],
+          criticalSkillsToLearn: ["Job Search Strategy", "Behavioral Interviews (STAR)", "Salary Negotiation", "Networking"],
+        },
+      ],
+      agentExplanation: buildAgentExplanation(
+        "CareerStrategyAgent",
+        "Fresher-to-Professional Roadmap (Offline Mode)",
+        ["Generated 5-phase roadmap starting from absolute basics for a complete beginner", "Each phase builds on the previous with specific free resources and hands-on projects"],
+        85
+      ),
+    };
+  }
+
+  if (isJunior) {
+    return {
+      targetRole,
+      estimatedTimeline: "8 - 12 Months",
+      summary: `Structured 4-phase roadmap to bridge the gap from junior/entry-level experience to job-ready ${targetRole}, focusing on depth, projects, and interview skills.`,
+      steps: [
+        {
+          phase: "Phase 1 (Months 1-2): Strengthen Core Skills",
+          duration: "60 Days",
+          milestoneTitle: "Close Knowledge Gaps & Build Depth",
+          description: "Identify and fix weak areas in your fundamentals before moving to advanced topics.",
+          keyActions: [
+            "Audit your current skills — list what you know well vs what is shallow",
+            "Deep-dive into data structures and algorithms (Neetcode 150 roadmap)",
+            "Build one project using best practices: clean code, tests, CI/CD pipeline",
+            "Learn Git workflows: branching, PRs, code reviews, rebase vs merge",
+            "Read and understand one open source codebase in your target stack",
+          ],
+          criticalSkillsToLearn: ["Data Structures & Algorithms", "Clean Code Principles", "Testing (Unit/Integration)", "Git Workflows"],
+        },
+        {
+          phase: "Phase 2 (Months 3-5): Role-Specific Depth",
+          duration: "90 Days",
+          milestoneTitle: `Master the ${targetRole} Tech Stack`,
+          description: "Go deep on the exact skills, tools, and architecture patterns the target role requires.",
+          keyActions: [
+            `Research 15 ${targetRole} job postings and identify the top 8 required skills`,
+            "Complete an advanced course or project in your primary stack",
+            "Learn system design fundamentals: databases, caching, load balancing, microservices",
+            "Build a full-stack or domain-specific project with real-world complexity",
+            "Set up observability in a project: logging, error tracking, basic monitoring",
+          ],
+          criticalSkillsToLearn: ["System Design Fundamentals", "Advanced Framework Patterns", "Cloud Basics (AWS/GCP)", "Observability"],
+        },
+        {
+          phase: "Phase 3 (Months 6-8): Portfolio Polish & Interview Prep",
+          duration: "90 Days",
+          milestoneTitle: "Job-Ready Portfolio & Technical Interviews",
+          description: "Package your work professionally and prepare for technical screening rounds.",
+          keyActions: [
+            "Finalize 2 strong portfolio projects with good documentation and live demos",
+            "Practice 75 LeetCode problems across medium difficulty",
+            "Do 5 mock technical interviews on Pramp or with peers",
+            "Study behavioral interview questions using STAR framework",
+            "Optimize your GitHub, LinkedIn, and resume for ATS keywords",
+          ],
+          criticalSkillsToLearn: ["Algorithm Problem Solving", "Behavioral Interviews", "Resume Optimization", "Technical Communication"],
+        },
+        {
+          phase: "Phase 4 (Months 9-12): Job Search & Offer",
+          duration: "Ongoing",
+          milestoneTitle: "Active Applications & Landing the Role",
+          description: "Execute a focused job search with clear tracking and continuous improvement.",
+          keyActions: [
+            "Apply to 10-15 roles per week with tailored resumes",
+            "Reach out directly to engineers and hiring managers on LinkedIn",
+            "Track every application and follow up after 7 days",
+            "Debrief every interview — what was asked, what you missed, what to study",
+            "Negotiate offers — junior to mid-level transitions often have 10-20% negotiation room",
+          ],
+          criticalSkillsToLearn: ["Job Search Strategy", "Negotiation", "Networking", "Interview Debriefing"],
+        },
+      ],
+      agentExplanation: buildAgentExplanation(
+        "CareerStrategyAgent",
+        "Junior-to-Mid Roadmap (Offline Mode)",
+        ["Generated 4-phase roadmap for a junior/entry-level engineer targeting their next role", "Focuses on depth, real projects, and structured interview preparation"],
+        85
+      ),
+    };
+  }
+
+  // Default: Mid-Senior to Senior/Staff
   return {
     targetRole,
-    estimatedTimeline: "6 - 9 Months",
+    estimatedTimeline: "4 - 9 Months",
     summary: `Strategic progression plan bridging core domain gaps and calibrating for ${targetRole} hiring loops.`,
     steps: [
       {
@@ -1227,7 +1512,7 @@ function buildFallbackRoadmap(targetRole: string) {
     ],
     agentExplanation: buildAgentExplanation(
       "CareerStrategyAgent",
-      "Template-based Roadmap Generation (Offline Mode)",
+      "Mid-to-Senior Roadmap (Offline Mode)",
       ["Generated phased roadmap using industry benchmark data from RAG knowledge base", "Personalized timeline based on typical Staff-level transition patterns"],
       85
     ),

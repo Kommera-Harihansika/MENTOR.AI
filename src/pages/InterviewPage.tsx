@@ -149,6 +149,7 @@ export const InterviewPage: React.FC<InterviewPageProps> = ({ user, token, darkM
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let fullJsonBuffer = '';
 
       while (true) {
         const { value, done } = await reader.read();
@@ -160,17 +161,50 @@ export const InterviewPage: React.FC<InterviewPageProps> = ({ user, token, darkM
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
+        let currentEvent = '';
         for (const line of lines) {
           const trimmed = line.trim();
-          if (trimmed.startsWith('data:')) {
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.replace(/^event:\s*/, '').trim();
+          } else if (trimmed.startsWith('data:')) {
             const jsonStr = trimmed.replace(/^data:\s*/, '');
             try {
               const data = JSON.parse(jsonStr);
-              if (data.text) setStreamBuffer((prev) => prev + data.text);
-              if (data.score !== undefined) setFeedback(data);
+              if (currentEvent === 'chunk' && data.text) {
+                fullJsonBuffer += data.text;
+                setStreamBuffer((prev) => prev + data.text);
+              } else if (currentEvent === 'complete') {
+                if (typeof data.score === 'number') {
+                  setFeedback(data);
+                  setStreamBuffer('');
+                } else if (data.raw) {
+                  try {
+                    const parsed = JSON.parse(fullJsonBuffer);
+                    if (typeof parsed.score === 'number') { setFeedback(parsed); setStreamBuffer(''); }
+                  } catch {}
+                }
+              } else if (currentEvent === 'error') {
+                setError(data.message || 'Evaluation failed.');
+              } else if (typeof data.score === 'number') {
+                // Fallback: complete object without event prefix
+                setFeedback(data);
+                setStreamBuffer('');
+              } else if (data.text) {
+                fullJsonBuffer += data.text;
+                setStreamBuffer((prev) => prev + data.text);
+              }
             } catch {}
+            currentEvent = '';
           }
         }
+      }
+
+      // Final attempt: parse accumulated buffer
+      if (!feedback && fullJsonBuffer) {
+        try {
+          const parsed = JSON.parse(fullJsonBuffer);
+          if (typeof parsed.score === 'number') { setFeedback(parsed); setStreamBuffer(''); }
+        } catch {}
       }
     } catch (err: any) {
       setError(err.message || 'Failed to receive interview evaluation.');

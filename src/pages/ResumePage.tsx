@@ -107,7 +107,7 @@ export const ResumePage: React.FC<ResumePageProps> = ({ user, token, onAnalysisD
       setStatusMessage('Resume Intelligence Agent — extracting competencies & ATS tokens...');
 
       let attempts = 0;
-      const maxAttempts = 30;
+      const maxAttempts = 90; // 90 × 1000ms = 90 seconds max
 
       const pollInterval = setInterval(async () => {
         attempts++;
@@ -116,7 +116,14 @@ export const ResumePage: React.FC<ResumePageProps> = ({ user, token, onAnalysisD
           const taskData = await taskRes.json();
 
           if (taskData.status === 'processing') {
-            setStatusMessage(`Resume Intelligence Agent — scoring against Staff+ rubric (${taskData.progress || 50}%)...`);
+            const progress = taskData.progress || 50;
+            if (attempts < 10) {
+              setStatusMessage('Resume Intelligence Agent — parsing resume structure...');
+            } else if (progress < 60) {
+              setStatusMessage('Resume Intelligence Agent — extracting skills & competencies...');
+            } else {
+              setStatusMessage(`Resume Intelligence Agent — scoring against ATS rubric (${progress}%)...`);
+            }
           } else if (taskData.status === 'completed') {
             clearInterval(pollInterval);
             setResult(taskData.result);
@@ -125,19 +132,19 @@ export const ResumePage: React.FC<ResumePageProps> = ({ user, token, onAnalysisD
             if (onAnalysisDone) onAnalysisDone(taskData.result);
           } else if (taskData.status === 'failed') {
             clearInterval(pollInterval);
-            throw new Error(taskData.error || 'Resume analysis failed.');
-          }
-
-          if (attempts >= maxAttempts) {
+            setError(taskData.error || 'Resume analysis failed. Please try again.');
+            setLoading(false);
+          } else if (attempts >= maxAttempts) {
             clearInterval(pollInterval);
-            throw new Error('Analysis timed out. Please try again.');
+            setError('Analysis is taking longer than expected. Please try again — the AI may be busy.');
+            setLoading(false);
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
           setError(pollErr.message || 'Error checking analysis status.');
           setLoading(false);
         }
-      }, 700);
+      }, 1000);
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred.');
       setLoading(false);
@@ -260,7 +267,7 @@ export const ResumePage: React.FC<ResumePageProps> = ({ user, token, onAnalysisD
                     </div>
                     <p className={`text-xs sm:text-sm ${textMuted} leading-relaxed`}>{sug.detail}</p>
                     {sug.beforeAfterExample && (
-                      <div className="space-y-2 pt-2 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} text-xs">
+                      <div className={`space-y-2 pt-2 border-t ${darkMode ? 'border-gray-700' : 'border-gray-100'} text-xs`}>
                         <div className="p-3 bg-red-50/80 border border-red-100 rounded-xl text-red-900">
                           <span className="font-bold block mb-0.5 text-[10px] text-red-600 uppercase tracking-wider">Before:</span>
                           "{sug.beforeAfterExample.before}"

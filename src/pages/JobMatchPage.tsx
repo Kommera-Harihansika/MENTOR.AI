@@ -24,6 +24,8 @@ Requirements:
 
 export const JobMatchPage: React.FC<JobMatchPageProps> = ({ user, token, darkMode }) => {
   const [jobDescription, setJobDescription] = useState('');
+  const [resumeText, setResumeText] = useState('');
+  const [showResumeInput, setShowResumeInput] = useState(!user?.resumeFileName);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<JobMatchResult | null>(null);
@@ -58,7 +60,7 @@ export const JobMatchPage: React.FC<JobMatchPageProps> = ({ user, token, darkMod
       const res = await fetch('/api/job-match', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ jobDescription }),
+        body: JSON.stringify({ jobDescription, resumeText: resumeText.trim() || undefined }),
       });
 
       const data = await res.json();
@@ -188,10 +190,46 @@ export const JobMatchPage: React.FC<JobMatchPageProps> = ({ user, token, darkMod
           placeholder="Paste the full job description here — responsibilities, requirements, and tech stack..."
           className={`w-full p-4 text-sm border rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y leading-relaxed transition-colors ${inputBg}`}
         />
-        {user?.resumeFileName && (
-          <p className={`text-xs ${textMuted}`}>
-            Comparing against: <span className={`font-semibold ${textPrimary}`}>{user.resumeFileName}</span>
-          </p>
+
+        {/* Resume source indicator / toggle */}
+        {user?.resumeFileName && !showResumeInput ? (
+          <div className="flex items-center justify-between">
+            <p className={`text-xs ${textMuted}`}>
+              Comparing against: <span className={`font-semibold ${textPrimary}`}>{user.resumeFileName}</span>
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowResumeInput(true)}
+              className="text-xs text-blue-600 hover:underline font-medium"
+            >
+              Use different resume
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className={`text-xs font-semibold ${textMuted}`}>
+                Your resume (paste text for best results)
+              </label>
+              {user?.resumeFileName && (
+                <button
+                  type="button"
+                  onClick={() => { setShowResumeInput(false); setResumeText(''); }}
+                  className="text-xs text-blue-600 hover:underline font-medium"
+                >
+                  Use saved resume
+                </button>
+              )}
+            </div>
+            <textarea
+              id="resume-text-input"
+              rows={5}
+              value={resumeText}
+              onChange={(e) => setResumeText(e.target.value)}
+              placeholder="Paste your resume text here, or leave blank to use your uploaded resume..."
+              className={`w-full p-4 text-sm border rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y leading-relaxed transition-colors ${inputBg}`}
+            />
+          </div>
         )}
       </div>
 

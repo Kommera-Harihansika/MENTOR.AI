@@ -10,12 +10,22 @@ interface RoadmapPageProps {
 }
 
 export const RoadmapPage: React.FC<RoadmapPageProps> = ({ user, token, darkMode }) => {
-  const [targetRole, setTargetRole] = useState(user?.targetRole || 'Staff Software Engineer');
-  const [currentLevel, setCurrentLevel] = useState(user?.experienceLevel || 'Senior Full-Stack Engineer');
+  const [targetRole, setTargetRole] = useState(user?.targetRole || '');
+  const [currentLevel, setCurrentLevel] = useState(user?.experienceLevel || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamBuffer, setStreamBuffer] = useState('');
   const [result, setResult] = useState<RoadmapResult | null>(null);
+
+  const EXPERIENCE_LEVELS = [
+    { value: 'Fresher / No Experience', label: '🌱 Fresher / No Experience', desc: 'Just starting out, no professional experience' },
+    { value: 'Student (Currently Studying)', label: '🎓 Student (Currently Studying)', desc: 'In college/bootcamp, learning actively' },
+    { value: 'Junior (0-1 Year)', label: '👨‍💻 Junior (0–1 Year)', desc: 'Less than a year of professional experience' },
+    { value: 'Early Mid-Level (1-2 Years)', label: '🔧 Early Mid-Level (1–2 Years)', desc: '1-2 years of professional experience' },
+    { value: 'Mid-Level (2-4 Years)', label: '⚙️ Mid-Level (2–4 Years)', desc: '2-4 years building and shipping products' },
+    { value: 'Senior (4-7 Years)', label: '🚀 Senior (4–7 Years)', desc: 'Leading features, mentoring, designing systems' },
+    { value: 'Staff / Lead (7+ Years)', label: '🏆 Staff / Lead (7+ Years)', desc: 'Cross-team impact, architecture decisions' },
+  ];
 
   const cardBg = darkMode ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200';
   const innerCardBg = darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200';
@@ -51,6 +61,7 @@ export const RoadmapPage: React.FC<RoadmapPageProps> = ({ user, token, darkMode 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let fullJsonBuffer = '';
 
       while (true) {
         const { value, done } = await reader.read();
@@ -62,17 +73,51 @@ export const RoadmapPage: React.FC<RoadmapPageProps> = ({ user, token, darkMode 
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
+        let currentEvent = '';
         for (const line of lines) {
           const trimmed = line.trim();
-          if (trimmed.startsWith('data:')) {
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.replace(/^event:\s*/, '').trim();
+          } else if (trimmed.startsWith('data:')) {
             const dataStr = trimmed.replace(/^data:\s*/, '');
             try {
               const data = JSON.parse(dataStr);
-              if (data.text) setStreamBuffer((prev) => prev + data.text);
-              if (data.steps && Array.isArray(data.steps)) setResult(data);
+              if (currentEvent === 'chunk' && data.text) {
+                fullJsonBuffer += data.text;
+                setStreamBuffer((prev) => prev + data.text);
+              } else if (currentEvent === 'complete') {
+                if (data.steps && Array.isArray(data.steps)) {
+                  setResult(data);
+                  setStreamBuffer('');
+                } else if (data.raw) {
+                  // Try to parse the raw accumulated buffer as a last resort
+                  try {
+                    const parsed = JSON.parse(fullJsonBuffer);
+                    if (parsed.steps) { setResult(parsed); setStreamBuffer(''); }
+                  } catch {}
+                }
+              } else if (currentEvent === 'error') {
+                setError(data.message || 'An error occurred.');
+              } else if (data.steps && Array.isArray(data.steps)) {
+                // Fallback: no event prefix, complete object arrived
+                setResult(data);
+                setStreamBuffer('');
+              } else if (data.text) {
+                fullJsonBuffer += data.text;
+                setStreamBuffer((prev) => prev + data.text);
+              }
             } catch {}
+            currentEvent = '';
           }
         }
+      }
+
+      // Final attempt: parse whatever accumulated in the buffer
+      if (!result && fullJsonBuffer) {
+        try {
+          const parsed = JSON.parse(fullJsonBuffer);
+          if (parsed.steps) { setResult(parsed); setStreamBuffer(''); }
+        } catch {}
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred while generating roadmap.');
@@ -85,15 +130,15 @@ export const RoadmapPage: React.FC<RoadmapPageProps> = ({ user, token, darkMode 
     <FeaturePage
       id="career-roadmap-page"
       headline="Career Strategy Agent"
-      description="Define your target role and let the Career Strategy Agent generate a personalized multi-phase roadmap with milestones, skills, and actions."
+      description="Tell us where you are and where you want to go — the AI will generate a step-by-step roadmap from your current level to your target role, starting from the basics if needed."
       agentName="Career Strategy Agent"
       agentDescription="Generates personalized career roadmaps with phase-by-phase milestones"
       actionButton={{
-        label: '🗺️ Generate Career Roadmap',
-        loadingLabel: 'Career Strategy Agent streaming...',
+        label: '🗺️ Generate My Roadmap',
+        loadingLabel: 'Career Strategy Agent building your roadmap...',
         onClick: handleGenerate,
         loading,
-        disabled: !targetRole.trim(),
+        disabled: !targetRole.trim() || !currentLevel,
       }}
       hasOutput={!!result || !!streamBuffer}
       darkMode={darkMode}
@@ -179,31 +224,66 @@ export const RoadmapPage: React.FC<RoadmapPageProps> = ({ user, token, darkMode 
         ) : null
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-4">
+        {/* Target Role */}
         <div>
           <label className={`block text-xs font-semibold ${textMuted} mb-1.5`}>
-            Target role or seniority level
+            What role do you want to reach?
           </label>
           <input
             id="roadmap-target-role-input"
             type="text"
             value={targetRole}
-            onChange={(e) => setTargetRole(e.target.value)}
-            placeholder="e.g. Staff Software Engineer, ML Engineer, Principal Architect"
+            onChange={(e) => { setTargetRole(e.target.value); setResult(null); }}
+            placeholder="e.g. Full-Stack Developer, ML Engineer, Staff Software Engineer, DevOps Engineer..."
             className={`w-full px-4 py-3.5 text-sm border rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${inputBg}`}
           />
         </div>
-        <div className="flex items-center justify-between">
-          <span className={`text-xs ${textMuted}`}>
-            Current level: <strong className={textPrimary}>{currentLevel}</strong>
-          </span>
-          <button
-            type="button"
-            onClick={() => setTargetRole('Staff Distributed Systems Engineer')}
-            className="text-xs text-blue-600 hover:underline font-medium"
+
+        {/* Current Level Dropdown */}
+        <div>
+          <label className={`block text-xs font-semibold ${textMuted} mb-1.5`}>
+            What is your current experience level?
+          </label>
+          <select
+            value={currentLevel}
+            onChange={(e) => { setCurrentLevel(e.target.value); setResult(null); }}
+            className={`w-full px-4 py-3.5 text-sm border rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors appearance-none cursor-pointer ${inputBg}`}
           >
-            Example: Staff Engineer
-          </button>
+            <option value="">— Select your current level —</option>
+            {EXPERIENCE_LEVELS.map((lvl) => (
+              <option key={lvl.value} value={lvl.value}>{lvl.label}</option>
+            ))}
+          </select>
+          {currentLevel && (
+            <p className={`mt-1.5 text-xs ${textMuted}`}>
+              {EXPERIENCE_LEVELS.find((l) => l.value === currentLevel)?.desc}
+            </p>
+          )}
+        </div>
+
+        {/* Quick examples */}
+        <div className="flex flex-wrap gap-2">
+          <span className={`text-xs ${textMuted} self-center`}>Quick start:</span>
+          {[
+            { role: 'Full-Stack Developer', level: 'Fresher / No Experience' },
+            { role: 'Data Scientist', level: 'Student (Currently Studying)' },
+            { role: 'Senior Backend Engineer', level: 'Mid-Level (2-4 Years)' },
+            { role: 'Staff Software Engineer', level: 'Senior (4-7 Years)' },
+          ].map((ex) => (
+            <button
+              key={ex.role}
+              type="button"
+              onClick={() => { setTargetRole(ex.role); setCurrentLevel(ex.level); setResult(null); }}
+              className={`text-xs px-3 py-1.5 rounded-xl border font-medium transition-colors ${
+                darkMode
+                  ? 'border-gray-700 text-gray-300 hover:border-blue-500 hover:text-blue-400'
+                  : 'border-gray-200 text-gray-600 hover:border-blue-400 hover:text-blue-600'
+              }`}
+            >
+              {ex.role}
+            </button>
+          ))}
         </div>
       </div>
 

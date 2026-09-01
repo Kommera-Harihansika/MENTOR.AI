@@ -108,6 +108,34 @@ const SkillBar: React.FC<{ skill: string; score: number; darkMode?: boolean }> =
 export const DashboardPage: React.FC<DashboardPageProps> = ({ user, token, onNavigate, darkMode }) => {
   const [report, setReport] = useState<CareerReadinessReport>(DEMO_REPORT);
   const [loading, setLoading] = useState(false);
+  const [hasRealData, setHasRealData] = useState(false);
+
+  // Fetch real dashboard data when user is logged in
+  useEffect(() => {
+    if (!token) return;
+    setLoading(true);
+    fetch('/api/dashboard', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.overallScore !== undefined) {
+          setReport({
+            overallScore: data.overallScore,
+            lastUpdated: data.lastUpdated || DEMO_REPORT.lastUpdated,
+            skillBreakdown: data.skillBreakdown?.length > 0 ? data.skillBreakdown : DEMO_REPORT.skillBreakdown,
+            missingSkills: data.missingSkills?.length > 0 ? data.missingSkills : DEMO_REPORT.missingSkills,
+            recommendedActions: data.recommendedActions?.length > 0 ? data.recommendedActions : DEMO_REPORT.recommendedActions,
+            resumeScore: data.resumeScore ?? DEMO_REPORT.resumeScore,
+            jobMatchScore: data.jobMatchScore ?? DEMO_REPORT.jobMatchScore,
+            interviewScore: data.interviewScore ?? DEMO_REPORT.interviewScore,
+          });
+          setHasRealData(data.hasRealData === true);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [token]);
 
   const bg = darkMode ? 'bg-gray-950' : 'bg-gray-50';
   const cardBg = darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200';
@@ -155,7 +183,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ user, token, onNav
               {user ? `${user.name.split(' ')[0]}'s Career Readiness` : 'Career Readiness Report'}
             </h1>
             <p className={`text-xs ${textMuted} mt-0.5`}>
-              Last updated {report.lastUpdated} · Powered by AI Agent Network
+              {hasRealData
+                ? `Last updated ${report.lastUpdated} · Powered by AI Agent Network`
+                : 'Upload your resume to see your real scores · Showing sample data'}
             </p>
           </div>
           <button

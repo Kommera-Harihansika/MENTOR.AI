@@ -127,6 +127,14 @@ export default function App() {
             user={user}
             token={token}
             darkMode={darkMode}
+            onAnalysisDone={(result) => {
+              // Update stored user file name so Job Match shows the correct source
+              if (user) {
+                const updated = { ...user, resumeFileName: user.resumeFileName || 'Uploaded Resume' };
+                setUser(updated);
+                localStorage.setItem('ai_career_mentor_user', JSON.stringify(updated));
+              }
+            }}
           />
         )}
 
